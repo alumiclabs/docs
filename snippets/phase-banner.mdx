@@ -1,0 +1,20 @@
+export const PhaseBanner = ({ phase, children }) => (
+  <Note>
+    **Phase {phase}.** {children ?? "See the roadmap for what ships in this phase."}
+  </Note>
+);
+
+{/*
+  Consistent phase-gating marker. Use wherever a feature, package, or section
+  is scoped to a specific phase rather than available today.
+
+  Consume:
+
+    import { PhaseBanner } from '/snippets/phase-banner.mdx';
+
+    <PhaseBanner phase="4">
+      The marketplace, UI designer, and vector editor land here.
+    </PhaseBanner>
+
+  The `children` slot is optional; omit for a bare "Phase N" chip.
+*/}

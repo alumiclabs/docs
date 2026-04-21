@@ -1,0 +1,41 @@
+export const DeploymentModes = () => (
+  <table>
+    <thead>
+      <tr><th>Mode</th><th>Runtime</th><th>Data</th><th>Object storage</th><th>Identity</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Hosted SaaS</strong> (alumic.app)</td>
+        <td>Multi-tenant Fastify cluster</td>
+        <td>Managed Postgres</td>
+        <td>S3-compatible</td>
+        <td>Email+password JWT · PAT (engine plugin / CLI)</td>
+      </tr>
+      <tr>
+        <td><strong>On-prem</strong></td>
+        <td>Docker Compose: `alumic-backend` + Postgres + MinIO</td>
+        <td>Self-hosted Postgres</td>
+        <td>MinIO</td>
+        <td>Same JWT + PAT model; optional SSO</td>
+      </tr>
+      <tr>
+        <td><strong>Single-user desktop</strong> (Electrobun)</td>
+        <td>Backend binary bound to `127.0.0.1` inside the shell</td>
+        <td>SQLite or embedded Postgres</td>
+        <td>Local-disk MinIO</td>
+        <td>Local-only PAT; no network auth</td>
+      </tr>
+    </tbody>
+  </table>
+);
+
+{/*
+  One source of truth for the deployment matrix. Consume with:
+
+    import { DeploymentModes } from '/snippets/deployment-modes.mdx';
+
+    <DeploymentModes />
+
+  Referenced by: /platform/deployment, /concepts/overview (implicit via site root),
+  /reference/entity-api, /reference/sync-protocol, /reference/save-system.
+*/}

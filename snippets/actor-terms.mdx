@@ -1,0 +1,23 @@
+export const ActorTerms = () => (
+  <>
+    <p>Four terms cut across every page that touches authoring identity:</p>
+    <ul>
+      <li><strong>Actor</strong> — the authoring identity behind a write. Resolves to either a User or an Agent (ADR-041).</li>
+      <li><strong>User</strong> — a human account with credentials. Owns PATs and (transitively) any Agent runs they initiate.</li>
+      <li><strong>Agent</strong> — a non-human author registered in a workspace. Executes `AgentRun`s on behalf of a User. Rate-limited and attributable.</li>
+      <li><strong>AgentRun</strong> — the unit of agent work — a bounded batch of writes tagged with the agent ID and the initiating user. Revertable as a unit.</li>
+      <li><strong>Proposal</strong> — a pending write held for human approval (ADR-042). Agent writes default to proposals; humans approve or reject.</li>
+    </ul>
+  </>
+);
+
+{/*
+  Short glossary used anywhere the actor model appears. Consume with:
+
+    import { ActorTerms } from '/snippets/actor-terms.mdx';
+
+    <ActorTerms />
+
+  Referenced by: /reference/actors-and-agents, /reference/project-management,
+  /reference/permissions, /platform/middleware.
+*/}

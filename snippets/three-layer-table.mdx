@@ -1,0 +1,47 @@
+export const ThreeLayerTable = () => (
+  <table>
+    <thead>
+      <tr>
+        <th>Layer</th>
+        <th>Server-side</th>
+        <th>Export format</th>
+        <th>Mutability</th>
+        <th>Example</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Authored Content</strong></td>
+        <td><code>entities.data</code> (JSONB)</td>
+        <td><code>.entity.json</code>, <code>.graph.json</code>, <code>.def.json</code>, <code>.strings.csv</code></td>
+        <td>Frozen at runtime</td>
+        <td>Dialogue trees, item definitions, skill graphs</td>
+      </tr>
+      <tr>
+        <td><strong>Editor Metadata</strong></td>
+        <td><code>entities.editor_metadata</code> (ADR-014)</td>
+        <td><code>.layout.json</code> sidecar</td>
+        <td>Never served to runtime clients</td>
+        <td>Node positions, viewport state, comments</td>
+      </tr>
+      <tr>
+        <td><strong>Runtime State</strong></td>
+        <td><code>save_slots.data</code></td>
+        <td><code>.save.json</code> via save system</td>
+        <td>Mutable, serializable</td>
+        <td>Current dialogue node, inventory, variable values</td>
+      </tr>
+    </tbody>
+  </table>
+);
+
+{/*
+  The three-layer separation. Consume with:
+
+    import { ThreeLayerTable } from '/snippets/three-layer-table.mdx';
+
+    <ThreeLayerTable />
+
+  Referenced by: /concepts/three-layer-model, /reference/data-formats,
+  /reference/entity-graph, /reference/save-system, /platform/database-schema.
+*/}

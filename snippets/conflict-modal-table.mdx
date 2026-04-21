@@ -1,0 +1,35 @@
+export const ConflictModalTable = () => (
+  <table>
+    <thead>
+      <tr><th>Action</th><th>What happens</th><th>When to choose</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Keep yours</strong></td>
+        <td>Re-fetch server state, replay your edit on top, send a fresh PATCH with the new <code>If-Match</code> version.</td>
+        <td>Your edit is the authoritative one; you accept the server's other changes as merged context.</td>
+      </tr>
+      <tr>
+        <td><strong>Discard yours</strong></td>
+        <td>Throw away the local edit; the cache updates to the server's current version.</td>
+        <td>You opened the tab earlier; someone else has since updated; their change supersedes.</td>
+      </tr>
+      <tr>
+        <td><strong>Open side-by-side</strong></td>
+        <td>Editor opens a two-pane view with your version on the left, server's on the right. Copy-paste or hand-merge.</td>
+        <td>Non-trivial divergence; you need to see both before deciding what survives.</td>
+      </tr>
+    </tbody>
+  </table>
+);
+
+{/*
+  Shared conflict-resolution matrix. Consume with:
+
+    import { ConflictModalTable } from '/snippets/conflict-modal-table.mdx';
+
+    <ConflictModalTable />
+
+  Referenced by: /reference/undo-history, /reference/entity-api,
+  /decisions/028-conflict-error-shape (optionally).
+*/}
