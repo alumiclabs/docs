@@ -1,0 +1,16 @@
+---
+title: "Design Constraints"
+description: "Rate limits, quotas, metering; invariants the platform enforces."
+icon: "gauge"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect), [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)
+</Info>
+
+## Design Constraints
+
+1. **The authoring API is never optional.** A SaaS user is always connected to the entity API; "offline" is a degraded mode ([ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect)), not a feature toggle.
+2. **Multiplayer is always optional.** A game template may use `@alumic/multiplayer` or not.
+3. **One codebase, one backend.** `packages/backend/` is the source of truth for all deployment modes ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)).
+4. **State sync, not RPC.** Both authoring and multiplayer use state synchronization, not RPC. Reads and writes are flat CRUD; protocol-level side effects are push events.

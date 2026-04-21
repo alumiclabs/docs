@@ -1,0 +1,368 @@
+---
+title: "Render Kernel"
+description: "Three.js-native abstraction boundary; WebGL + future WebGPU."
+icon: "cube"
+---
+
+## Overview
+
+The render kernel is the abstraction boundary between Alumic and the GPU. It provides a minimal interface that rendering backends implement. The kernel does **not** own the game loop, the scene graph, or the camera — it only manages the GPU context, frame lifecycle, and presentation.
+
+Two packages are involved:
+- **`@alumic/render`** — Defines the `RenderKernel` interface (types only, zero runtime code)
+- **`@alumic/render-three`** — Implements `RenderKernel` using Three.js WebGL
+
+Future backends (`@alumic/render-webgpu`) implement the same interface.
+
+## RenderKernel Interface
+
+Defined in `@alumic/render`:
+
+```typescript
+export interface RenderKernel {
+  /** Identifier for this backend (e.g., 'three-webgl', 'three-webgpu'). */
+  readonly kind: string;
+
+  /** The HTML canvas element this kernel renders to. */
+  readonly canvas: HTMLCanvasElement;
+
+  /** Capability flags for this backend. */
+  readonly caps: RenderKernelCaps;
+
+  /**
+   * Initialize the renderer. Called once during App.boot().
+   * May be async (e.g., WebGPU adapter/device request).
+   */
+  init(target: RenderTarget): Promise<void>;
+
+  /**
+   * Called at the start of each frame (PreUpdate phase).
+   * Prepare for rendering: clear buffers, update uniforms, etc.
+   */
+  beginFrame(frame: FrameInfo): void;
+
+  /**
+   * Called at the end of each frame (PostUpdate phase).
+   * Submit draw calls and present to screen.
+   */
+  render(frame: FrameInfo): void;
+
+  /**
+   * Handle canvas resize.
+   * Updates viewport, projection matrices, and internal render targets.
+   */
+  resize(width: number, height: number): void;
+
+  /** Clean up GPU resources. Called during App.shutdown(). */
+  dispose(): void;
+}
+```
+
+### Supporting Types
+
+```typescript
+export interface RenderTarget {
+  /** The HTML canvas element to render into. */
+  readonly canvas: HTMLCanvasElement;
+
+  /** Device pixel ratio (window.devicePixelRatio). */
+  readonly pixelRatio: number;
+}
+
+export interface FrameInfo {
+  /** Seconds since last frame. */
+  readonly dt: number;
+
+  /** Total elapsed seconds since boot. */
+  readonly elapsed: number;
+
+  /** Frame index. */
+  readonly frame: number;
+
+  /** Current canvas width in CSS pixels. */
+  readonly width: number;
+
+  /** Current canvas height in CSS pixels. */
+  readonly height: number;
+}
+
+export interface RenderKernelCaps {
+  /** Whether this backend supports WebGPU. */
+  readonly webgpu: boolean;
+
+  /** Whether compute shaders are available. */
+  readonly compute: boolean;
+
+  /** Maximum MSAA sample count supported. */
+  readonly msaa: number;
+
+  /** Maximum texture dimension (width or height). */
+  readonly maxTextureSize: number;
+}
+```
+
+## Three.js Implementation
+
+`@alumic/render-three` provides the `ThreeRenderKernel` class and a `threeWebGL()` plugin factory.
+
+### ThreeRenderKernel
+
+```typescript
+import * as THREE from 'three';
+import type { RenderKernel, RenderTarget, FrameInfo, RenderKernelCaps } from '@alumic/render';
+
+export interface ThreeWebGLConfig {
+  /** Three.js WebGLRenderer constructor parameters. */
+  antialias?: boolean;
+  alpha?: boolean;
+  powerPreference?: 'default' | 'high-performance' | 'low-power';
+
+  /** Enable shadow mapping. */
+  shadowMap?: boolean;
+  shadowMapType?: THREE.ShadowMapType;
+
+  /** Tone mapping operator. */
+  toneMapping?: THREE.ToneMapping;
+  toneMappingExposure?: number;
+
+  /** Output color space. */
+  outputColorSpace?: THREE.ColorSpace;
+}
+
+export class ThreeRenderKernel implements RenderKernel {
+  readonly kind = 'three-webgl';
+  readonly canvas: HTMLCanvasElement;
+  readonly caps: RenderKernelCaps;
+
+  /** Direct access to the Three.js renderer. */
+  readonly renderer: THREE.WebGLRenderer;
+
+  /** The active Three.js scene. Set by game code via setScene(). */
+  scene: THREE.Scene;
+
+  /** The active camera. Set by game code via setCamera(). */
+  camera: THREE.Camera;
+
+  constructor(config?: ThreeWebGLConfig);
+
+  async init(target: RenderTarget): Promise<void>;
+  beginFrame(frame: FrameInfo): void;
+  render(frame: FrameInfo): void;
+  resize(width: number, height: number): void;
+  dispose(): void;
+
+  /** Set the active scene for rendering. */
+  setScene(scene: THREE.Scene): void;
+
+  /** Set the active camera. */
+  setCamera(camera: THREE.Camera): void;
+}
+```
+
+**Note:** `scene` and `camera` on `ThreeRenderKernel` are Three.js-specific extensions beyond the `RenderKernel` interface. Template code that needs Three.js-specific access imports from `@alumic/render-three` directly, not from `@alumic/render`.
+
+### threeWebGL Plugin Factory
+
+```typescript
+import { definePlugin, defineSubsystem, Scope, Phase } from '@alumic/core';
+import type { RenderKernel } from '@alumic/render';
+
+/**
+ * Subsystem handle for accessing the render kernel from other plugins.
+ */
+export const RenderSubsystem: SubsystemHandle<ThreeRenderKernel>;
+
+/**
+ * Create the Three.js WebGL renderer plugin.
+ *
+ * @example
+ * const app = new App({
+ *   plugins: [
+ *     threeWebGL({ antialias: true, shadowMap: true }),
+ *   ],
+ * });
+ */
+export function threeWebGL(config?: ThreeWebGLConfig): AlumicPlugin;
+```
+
+The `threeWebGL()` plugin:
+1. Registers `RenderSubsystem` at `Scope.App`
+2. Schedules `beginFrame()` at `Phase.PreUpdate`
+3. Schedules `render()` at `Phase.PostUpdate`
+4. Handles canvas resize via `ResizeObserver`
+
+## SolidJS Canvas Integration
+
+Since Alumic uses SolidJS from day one, the Three.js canvas is mounted via a SolidJS component.
+
+### Canvas Component
+
+```tsx
+// @alumic/render-three/src/Canvas.tsx
+import { onMount, onCleanup, type ParentComponent } from 'solid-js';
+
+export interface CanvasProps {
+  /** CSS class for the canvas container div. */
+  class?: string;
+
+  /** Inline styles for the canvas container. */
+  style?: string | Record<string, string>;
+
+  /**
+   * Called with the render kernel after initialization.
+   * Use to set up the scene and camera.
+   */
+  onReady?: (kernel: ThreeRenderKernel) => void;
+}
+
+/**
+ * SolidJS component that creates and manages a Three.js canvas.
+ * The canvas fills its container div.
+ *
+ * @example
+ * <Canvas
+ *   class="game-viewport"
+ *   onReady={(kernel) => {
+ *     kernel.setScene(myScene);
+ *     kernel.setCamera(myCamera);
+ *   }}
+ * >
+ *   <HUD />  {/* SolidJS overlay on top of the canvas *\/}
+ * </Canvas>
+ */
+export const Canvas: ParentComponent<CanvasProps>;
+```
+
+### App Shell Pattern
+
+The standard Alumic application structure is a SolidJS app shell that hosts the Three.js canvas:
+
+```tsx
+// templates/topdown-action/src/App.tsx
+import { Canvas } from '@alumic/render-three';
+import { HUD } from './ui/HUD';
+import { DebugPanel } from './ui/DebugPanel';
+
+export function App() {
+  return (
+    <div class="alumic-app">
+      <Canvas
+        class="game-canvas"
+        onReady={(kernel) => {
+          // Set up the scene
+          const scene = new THREE.Scene();
+          scene.background = new THREE.Color(0x1a1a2e);
+          kernel.setScene(scene);
+
+          // Set up the camera
+          const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
+          camera.position.set(0, 10, 10);
+          camera.lookAt(0, 0, 0);
+          kernel.setCamera(camera);
+        }}
+      >
+        {/* SolidJS children render ON TOP of the canvas */}
+        <HUD />
+      </Canvas>
+
+      {import.meta.env.DEV && <DebugPanel />}
+    </div>
+  );
+}
+```
+
+### CSS Layout
+
+```css
+.alumic-app {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  position: relative;
+}
+
+.game-canvas {
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+/* HUD and other SolidJS UI overlays on top */
+.game-canvas > :not(canvas) {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none; /* allow clicks to pass through to canvas */
+}
+```
+
+## Canvas Lifecycle
+
+### Creation
+
+The `Canvas` component creates the `<canvas>` element on mount. The canvas is owned by the component, not by the kernel — if the component unmounts, the canvas is removed from the DOM.
+
+### Resize
+
+A `ResizeObserver` watches the container div. When it resizes:
+1. The canvas `width` and `height` attributes are updated (accounting for `devicePixelRatio`)
+2. `kernel.resize()` is called, which updates the Three.js renderer size and camera aspect ratio
+
+### Pixel Ratio
+
+The kernel respects `window.devicePixelRatio` for sharp rendering on HiDPI displays. The canvas CSS size is the logical size; the canvas buffer size is `logicalSize * devicePixelRatio`.
+
+### Disposal
+
+When the SolidJS component unmounts or `App.shutdown()` is called:
+1. The `ResizeObserver` is disconnected
+2. `kernel.dispose()` is called (releases WebGL context)
+3. The canvas element is removed from the DOM
+
+## Abstraction Boundary
+
+The `RenderKernel` interface is intentionally minimal. It does NOT abstract:
+
+- **Scene graph** — Template code works directly with `THREE.Scene`, `THREE.Mesh`, etc. The kernel just renders whatever scene/camera is set.
+- **Materials/Shaders** — Templates use Three.js materials directly.
+- **Post-processing** — Templates set up Three.js `EffectComposer` directly on the kernel's renderer.
+- **Camera controls** — Templates use Three.js camera control libraries (OrbitControls, etc.) directly.
+
+The abstraction exists at the **GPU context level**, not the scene graph level. This means:
+- Switching from WebGL to WebGPU is a kernel change, not a scene graph change
+- Template code that uses Three.js objects is Three.js-specific (acceptable — it would need rewriting for a different renderer anyway)
+- The kernel interface is small enough to implement for any rendering backend
+
+## WebGPU Future Path
+
+When Three.js stabilizes its WebGPU renderer, a new package `@alumic/render-webgpu` will provide:
+
+```typescript
+export class ThreeWebGPUKernel implements RenderKernel {
+  readonly kind = 'three-webgpu';
+  // Same interface, different implementation
+}
+
+export function threeWebGPU(config?: ThreeWebGPUConfig): AlumicPlugin;
+```
+
+Template code switches renderers by changing one line:
+
+```typescript
+// Before
+plugins: [threeWebGL({ antialias: true })]
+
+// After
+plugins: [threeWebGPU({ antialias: true })]
+```
+
+The scene, materials, and game logic remain unchanged (assuming Three.js maintains API compatibility between its WebGL and WebGPU renderers).
+
+## Headless Mode
+
+When `App` is created with `headless: true`, no `RenderKernel` is registered. The scheduler still runs PreUpdate → Update → PostUpdate, but no rendering occurs. This is used for:
+- **Testing** — Run game logic without a canvas
+- **Server-side** — Run simulation without rendering (future multiplayer server)
+- **CLI tools** — Validate game data without a browser

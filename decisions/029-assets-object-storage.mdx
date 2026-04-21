@@ -1,0 +1,53 @@
+---
+title: "ADR-029: Binary assets are object-storage blobs with signed URLs"
+description: "Binary assets live in **object storage** (S3-compatible; MinIO for on-prem)."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Spec 14 described asset loaders calling `fetch(src)` on opaque strings; the spec was not updated when the SaaS pivot landed. Under SaaS, binary assets (textures, models, audio, fonts, SVGs) cannot live on the client's disk and cannot be free-read by unauthenticated clients. The engine plugin needs raw bytes (to import into Unity's AssetDatabase); the browser needs a CDN-friendly fetch path.
+
+## Decision
+
+Binary assets live in **object storage** (S3-compatible; MinIO for on-prem). An `Asset` is an Alumic entity type (standard write path, [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)/014/015):
+
+```ts
+interface AssetEntity {
+  id: string;
+  type: 'Asset';
+  name: string;
+  data: {
+    kind: 'texture' | 'model' | 'audio' | 'font' | 'svg' | 'generic';
+    contentType: string;        // 'image/png', 'model/gltf-binary', ...
+    byteLength: number;
+    sha256: string;             // content address
+    bundle?: string;            // Alumic asset-bundle tag
+  };
+}
+```
+
+The backend issues transport URLs scoped to the current identity:
+
+- **Browser-facing:** `GET /api/assets/:id` returns `{ url, expiresAt, sha256, byteLength, contentType }` where `url` is a pre-signed object-storage URL (default TTL 15 minutes). The browser passes `url` into existing loaders.
+- **Engine-plugin-facing:** `GET /api/assets/:id/raw` streams bytes through the backend with `Range` support. The plugin content-address-caches by `sha256`; re-requests are `304 Not Modified` when the client sends `If-None-Match`.
+
+Uploads: `POST /api/assets` returns a pre-signed upload URL + the eventual asset ID; the client PUTs directly to object storage; a webhook (or a follow-up `POST /api/assets/:id/commit`) validates the SHA-256 and flips the entity to committed.
+
+On-prem deployments bundle MinIO in the Docker image. File export emits actual bytes under `public/assets/<sha256>` with a manifest mapping asset IDs to `sha256`.
+
+## Consequences
+
+**Enables:** Single storage model across SaaS and on-prem. Content-addressed caching. Signed URLs keep hot paths on CDN without leaking object-storage credentials. The engine plugin never handles URLs — it asks for bytes and gets them.
+
+**Obligates:** Object storage is a mandatory backend dependency from Phase 2. The backend runs a periodic GC over uncommitted uploads. `AssetHandle.src` becomes opaque to clients; they resolve via `ctx.assets.load(id)`.
+
+**Forecloses:** Relative asset paths in entity data. `portrait: "assets/portraits/hermit.png"` becomes `portrait: "<asset-id>"` — resolved at read time.
+
+## Related
+
+- Specs: [Asset Management](/reference/asset-management), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [Engine Plugin](/platform/engine-plugin)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first).
+- Informs: [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side).

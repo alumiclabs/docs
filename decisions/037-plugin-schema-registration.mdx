@@ -1,0 +1,122 @@
+---
+title: "ADR-037: Plugin-defined schemas, extractors, and migrations ship as publish artifacts"
+description: "Plugin-contributed schemas, reference extractors, and migrations ship as **static artifacts** emitted by the publish pipeline (ADR-033)."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation) requires the backend to validate every entity write against its Zod schema. [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api) lets plugins register new entity types at runtime via `ctx.entities.registerType()`. [ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation) requires schema version negotiation and migrations for entity-type evolution. Spec 23 additionally lets plugins register reference extractors via `ctx.entities.registerExtractor()` — but that call runs client-side during `plugin.build()`, while [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation) asserts extractors run server-side on write.
+
+[ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation) explicitly left the registration channel unresolved: "(a) backend loads all published plugins at boot, or (b) plugins declare schemas via a static artifact the marketplace ([ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4)) indexes."
+
+Option (a) requires the backend to execute arbitrary third-party JavaScript during writes — incompatible with the worker-sandbox posture of [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing). Option (b) fits the existing publish pipeline ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side)) and keeps the backend's write-path hermetic.
+
+## Decision
+
+Plugin-contributed schemas, reference extractors, and migrations ship as **static artifacts** emitted by the publish pipeline ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side)). The backend never executes plugin JavaScript at write time.
+
+### Publish-time emission
+
+When `alumic publish` processes a plugin, the publish pipeline extracts three static artifacts in addition to the ones in [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side):
+
+```
+plugin@version/
+├── meta.json                       # existing ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side))
+├── bundle.js                       # existing — client-side runtime
+├── schema.json                     # existing — descriptors ([ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation))
+├── artifacts/...                   # existing — engine targets ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side))
+└── registrations.json              # NEW
+```
+
+`registrations.json` contains, per entity type the plugin declares:
+
+```ts
+interface PluginRegistrations {
+  pluginId: string;
+  version: string;
+  entityTypes: Array<{
+    name: string;
+    schemaHash: string;             // matches schema.json
+    revision: number;               // [ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation) major.minor — `major` here
+    // Declarative reference extractors — NO code.
+    refExtractors: Array<{
+      role: string;                 // 'speaker', 'location', ...
+      path: string;                 // JSONPath into entity.data
+      targetType: string;
+      // Optional: extract per-array-element with a sub-path.
+      each?: string;
+    }>;
+    // Declarative migrations — NO code in phase 4.
+    migrations: Array<{
+      fromRevision: number;
+      toRevision: number;
+      ops: MigrationOp[];
+    }>;
+  }>;
+}
+
+type MigrationOp =
+  | { op: 'rename-field'; from: string; to: string }
+  | { op: 'add-field'; path: string; default: unknown }
+  | { op: 'remove-field'; path: string }
+  | { op: 'map-enum'; path: string; mapping: Record<string, string> }
+  | { op: 'copy-field'; from: string; to: string };
+```
+
+The publish pipeline derives `refExtractors` and `migrations` from declarations the plugin author writes in source:
+
+```ts
+defineEntityType({
+  name: 'CraftingRecipe',
+  schema: CraftingRecipeSchema,
+  refs: [
+    { role: 'ingredient', path: '$.ingredients[*].itemRef', targetType: 'Item', each: '$' },
+    { role: 'result', path: '$.result.itemRef', targetType: 'Item' },
+  ],
+  migrations: {
+    2: [ { op: 'rename-field', from: 'time', to: 'craftingTime' } ],
+  },
+});
+```
+
+`ctx.entities.registerType()` and `ctx.entities.registerExtractor()` remain the **client-side** surface — the runtime still needs type handles for editor wiring and in-memory validation. Their declarative configuration is what the publish pipeline extracts for the backend.
+
+### Backend ingest
+
+On marketplace install (or on-prem `alumic register-plugin`), the backend:
+
+1. Verifies the bundle signature ([ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing)).
+2. Loads `schema.json` into the workspace's entity-type registry.
+3. Loads `registrations.json`; compiles its declarative extractors and migrations into the backend's evaluator.
+4. Refuses install if any extractor path is malformed or any migration op is unrecognized (forward-compatibility guard).
+
+Extractors and migrations are pure data-driven transforms. The backend's evaluator has a fixed op-code set; plugins cannot ship novel evaluation logic in Phase 4. Expanding the op-code set is itself an ADR-gated change.
+
+### Dev-loop (unpublished plugins)
+
+During plugin development against `POST /api/transpile`-style workspace-scoped flows, the CLI can POST a `registrations.json` directly:
+
+```
+POST /api/workspaces/:id/plugins/dev
+Content-Type: application/json
+Body: { pluginId, version, schema, registrations }
+```
+
+The backend stores these as workspace-scoped drafts, rate-limited, metered ([ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag)), and auto-expiring after 7 days. Draft plugins are invisible to other workspaces.
+
+## Consequences
+
+**Enables:** A single, hermetic backend write path. Third-party plugins extend the schema and the reference graph without ever executing inside the backend process. The worker sandbox ([ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing)) stays intact because nothing about schema evaluation requires plugin code at runtime.
+
+**Obligates:** `defineEntityType` grows `refs` and `migrations` declarative fields (backwards-compatible — optional). The publish pipeline grows a lint step that rejects plugins whose client-side `registerExtractor` does work the declarative op-codes can't express. A plugin author guide documents the portable op-code set.
+
+**Forecloses:** Arbitrary JavaScript reference extractors and migration functions running in the backend. Plugins that need imperative extraction (e.g., parsing freeform markdown for `[[entity-id]]` links) must either (a) express it declaratively, or (b) accept the reference link is client-side-only and won't populate the backlink index.
+
+## Related
+
+- Specs: [Plugin System](/reference/plugin-system), [Writing a Plugin](/guides/writing-a-plugin), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [Template System](/reference/template-system)
+- Depends on: [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing).
+- Informs: Phase 4 marketplace scope.

@@ -1,122 +1,295 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Alumic",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#4F46E5",
+    "light": "#818CF8",
+    "dark": "#3730A3"
   },
   "favicon": "/favicon.svg",
   "navigation": {
     "tabs": [
+      {
+        "tab": "Concepts",
+        "groups": [
+          {
+            "group": "Get oriented",
+            "pages": [
+              "index",
+              "concepts/principles",
+              "concepts/glossary",
+              "concepts/three-layer-model",
+              "concepts/what-alumic-is-not",
+              "concepts/roadmap"
+            ]
+          }
+        ]
+      },
       {
         "tab": "Guides",
         "groups": [
           {
             "group": "Getting started",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "guides/index",
+              "guides/quickstart",
+              "guides/project-structure"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Authoring",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "guides/authoring-entities",
+              "guides/flow-and-state",
+              "guides/dialogue",
+              "guides/abilities",
+              "guides/ui-design"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Plugin development",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "guides/writing-a-plugin",
+              "guides/testing"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Operations",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "guides/cli",
+              "guides/validation",
+              "guides/debugging"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Overview",
             "pages": [
-              "api-reference/introduction"
+              "reference/index"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Architecture",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "reference/architecture",
+              "reference/app-lifecycle",
+              "reference/subsystem-hierarchy"
+            ]
+          },
+          {
+            "group": "Kernel primitives",
+            "pages": [
+              "reference/event-bus",
+              "reference/scheduler",
+              "reference/tag-registry",
+              "reference/render-kernel"
+            ]
+          },
+          {
+            "group": "Data model",
+            "pages": [
+              "reference/entity-graph",
+              "reference/entity-types-and-extractors",
+              "reference/entity-database",
+              "reference/data-formats"
+            ]
+          },
+          {
+            "group": "Game systems",
+            "pages": [
+              "reference/state-machines",
+              "reference/dialogue-system",
+              "reference/ability-system",
+              "reference/asset-management",
+              "reference/save-system",
+              "reference/input-system",
+              "reference/template-system"
+            ]
+          },
+          {
+            "group": "Plugin API",
+            "pages": [
+              "reference/plugin-system",
+              "reference/entity-api",
+              "reference/sync-protocol"
+            ]
+          },
+          {
+            "group": "Editor & shell",
+            "pages": [
+              "reference/navigation-shell",
+              "reference/undo-history",
+              "reference/canvas-and-workspace",
+              "reference/ui-integration",
+              "reference/ui-designer"
+            ]
+          },
+          {
+            "group": "Teams & agents",
+            "pages": [
+              "reference/permissions",
+              "reference/project-management",
+              "reference/actors-and-agents"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Platform",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "platform/index"
+            ]
+          },
+          {
+            "group": "Deployment & identity",
+            "pages": [
+              "platform/deployment",
+              "platform/authentication",
+              "platform/database-schema"
+            ]
+          },
+          {
+            "group": "Runtime",
+            "pages": [
+              "platform/middleware",
+              "platform/multiplayer",
+              "platform/design-constraints"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "platform/engine-plugin",
+              "platform/marketplace"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Decisions",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "decisions/index"
+            ]
+          },
+          {
+            "group": "Product and phasing",
+            "pages": [
+              "decisions/001-saas-first",
+              "decisions/002-phase-1-in-memory-shim",
+              "decisions/003-auth-phasing",
+              "decisions/004-no-realtime-collab",
+              "decisions/021-marketplace-phase-4",
+              "decisions/022-koota-post-1-0",
+              "decisions/023-phase-4-5-conditional",
+              "decisions/024-research-frozen",
+              "decisions/043-project-management-phase-3"
+            ]
+          },
+          {
+            "group": "Foundation and kernel",
+            "pages": [
+              "decisions/005-bun-workspaces",
+              "decisions/006-xstate-plus-custom-flow",
+              "decisions/007-plugin-identity-in-code",
+              "decisions/008-line-ids-authored",
+              "decisions/009-synchronous-event-bus",
+              "decisions/010-init-failure-fail-fast",
+              "decisions/011-disposable-shape",
+              "decisions/012-scheduler-append-on-push"
+            ]
+          },
+          {
+            "group": "Data model and validation",
+            "pages": [
+              "decisions/013-server-side-validation",
+              "decisions/014-layout-separate-field",
+              "decisions/015-canvas-via-entity-db",
+              "decisions/016-constant-entity",
+              "decisions/017-shared-variable-registry",
+              "decisions/018-entity-registration-api",
+              "decisions/019-ecs-fieldtype-exposed",
+              "decisions/020-three-native-boundary"
+            ]
+          },
+          {
+            "group": "Identity, auth, API",
+            "pages": [
+              "decisions/025-project-identity-server-uuid",
+              "decisions/026-engine-plugin-auth",
+              "decisions/035-cli-saas-aware",
+              "decisions/036-usage-metering-workspace-tag",
+              "decisions/038-multiplayer-room-tickets",
+              "decisions/046-plugin-sandbox-csp",
+              "decisions/049-identity-mutable-project-optional"
+            ]
+          },
+          {
+            "group": "Sync, conflict, versioning",
+            "pages": [
+              "decisions/027-engine-plugin-sync-protocol",
+              "decisions/028-conflict-error-shape",
+              "decisions/030-schema-version-negotiation",
+              "decisions/031-offline-and-reconnect",
+              "decisions/032-entity-versions-event-log",
+              "decisions/050-entity-cache-miss-policy",
+              "decisions/051-schema-tolerance-and-cursor-errors"
+            ]
+          },
+          {
+            "group": "Assets, engine, marketplace",
+            "pages": [
+              "decisions/029-assets-object-storage",
+              "decisions/033-engine-transpile-server-side",
+              "decisions/034-marketplace-sandbox-signing",
+              "decisions/037-plugin-schema-registration",
+              "decisions/039-template-seed-format",
+              "decisions/044-swap-driver-arbitration",
+              "decisions/052-engine-plugin-mirror-versioning"
+            ]
+          },
+          {
+            "group": "Teams, actors, approvals",
+            "pages": [
+              "decisions/040-undo-wire-semantics",
+              "decisions/041-actor-model",
+              "decisions/042-proposed-writes-approvals",
+              "decisions/045-cross-workspace-import",
+              "decisions/047-entity-id-policy",
+              "decisions/048-template-install-seed",
+              "decisions/053-delete-with-backlinks-fanout"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
+    ]
   },
   "logo": {
     "light": "/logo/light.svg",
     "dark": "/logo/dark.svg"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
+    "links": []
   },
   "contextual": {
     "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
+      "copy",
+      "view",
+      "claude",
+      "chatgpt"
+    ]
   },
   "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    "socials": {}
   }
 }

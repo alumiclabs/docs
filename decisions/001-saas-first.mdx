@@ -1,0 +1,33 @@
+---
+title: "ADR-001: SaaS-first, on-prem second"
+description: "Alumic ships as a SaaS product first."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The spec as originally drafted was local-first: a developer scaffolded a template, files lived in a git repo, and `bun dev` ran the browser app. Cloud services (Fastify + Postgres) were mentioned only for Phase 4 player save sync.
+
+However, Alumic's product framing — "browser-first creative tools platform", Articy:Draft killer, canvas + UI designer + vector editor all in the browser — implies a hosted experience. A designer should be able to visit alumic.app, create a project, and have their work persist to an account. None of that was architected.
+
+The two realistic positions were (a) local-first only, defer SaaS, or (b) SaaS-first with on-prem as an enterprise option. Larger studios will insist on on-prem for IP security and compliance, but hosted SaaS is the primary revenue and adoption path.
+
+## Decision
+
+Alumic ships as a SaaS product first. The hosted deployment (alumic.app) and the on-prem deployment run from a single codebase; deployment mode is selected by configuration. Enterprise-only features (SSO, audit logs, team management depth) are gated by license/config flags, not by separate forks.
+
+## Consequences
+
+**Enables:** Browser-only authoring workflow. Team collaboration, live rebalancing via entity edits, managed backups, and a marketplace ([ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4)) all become natural. On-prem customers get the full stack as a Docker image or bun binary.
+
+**Obligates:** Backend infrastructure is no longer a Phase 4 concern — it is the primary data layer. Interfaces (EntityDatabase, plugin loading, save sync) must be designed async/remote-friendly from day one. Authored files (`.graph.json`, `.entity.json`) become export/import/on-prem seeding format, not primary storage.
+
+**Forecloses:** A pure local-first product with optional cloud sync. Users who want "my files on my disk" workflows use the on-prem deployment or file export.
+
+## Related
+
+- Specs: [Alumic](/), [Design Principles](/concepts/principles), [Glossary](/concepts/glossary), [Three-Layer Data Model](/concepts/three-layer-model), [What Alumic Is Not](/concepts/what-alumic-is-not), [Project Structure](/guides/project-structure), [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database)
+- Findings resolved: B3, C2 (partially), audit-2 #03, #13.
+- Informs: [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim), [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab), [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field), [ADR-015 Canvas persistence goes through the entity database](/decisions/015-canvas-via-entity-db), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4).

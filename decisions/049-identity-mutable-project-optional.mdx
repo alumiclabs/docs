@@ -1,0 +1,48 @@
+---
+title: "ADR-049: `Identity` is mutable; `projectId` is optional"
+description: "`Identity` is **mutable** and `projectId` is **optional**:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Spec 04 declared an App-scope `Identity` resource with a required `projectId`. That shape fits game runtimes (a template boots against one project) and the engine plugin (bound to one project via `binding.json`). It does not fit the editor shell (spec 24), which is workspace-scoped and lets the user open and switch projects without rebooting the App. Subsystems capturing `Identity` by reference at init hold stale data across a login, logout, or project switch — producing silent bugs.
+
+## Decision
+
+`Identity` is **mutable** and `projectId` is **optional**:
+
+```ts
+interface Identity {
+  readonly userId: string;
+  readonly workspaceId: string;
+  readonly projectId?: string;   // set by game runtimes and engine plugin; may be unset in the editor shell
+  readonly clientKind: 'browser' | 'plugin' | 'cli';
+}
+```
+
+Changes flow through an `IdentityChanged` channel:
+
+```ts
+export const IdentityChanged = defineChannel<{
+  previous: Identity | null;
+  current: Identity | null;
+}>('Identity.Changed');
+```
+
+The kernel owns the resource; plugins and subsystems **subscribe** to `IdentityChanged` rather than capturing by reference. The editor shell's `ProjectSubsystem` at `Scope.Session` materializes the active project and emits `IdentityChanged` with the updated `projectId`. Logging in, logging out, and opening/closing a project all fire the channel. Game runtimes and the engine plugin seed a fixed `Identity` at boot and never mutate it.
+
+## Consequences
+
+**Enables:** One identity model for game clients, editor shell, CLI, and engine plugin. Project switching in the editor shell is a Session-scope transition rather than an App reboot. Workspace-level screens (project picker, billing) render without a `projectId` in scope.
+
+**Obligates:** Subsystems that depend on `projectId` (entity cache, asset cache, sync-stream subscription, outbox) must subscribe to `IdentityChanged` and reset when it fires. The Phase-1 shim seeds a synthetic `Identity` with no `projectId` until a project is opened — consistent with the browser editor flow.
+
+**Forecloses:** Capturing `Identity` by reference at `init()` time. Any subsystem that does so must be updated to resolve it through `ctx.getResource(Identity)` at use-time or subscribe to the channel.
+
+## Related
+
+- Specs: [App Lifecycle](/reference/app-lifecycle), [Navigation and Shell](/reference/navigation-shell), [Undo and History](/reference/undo-history), [Engine Plugin](/platform/engine-plugin)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth).

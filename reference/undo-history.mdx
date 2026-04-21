@@ -1,0 +1,198 @@
+---
+title: "Undo and History"
+description: "Per-entity undo stacks, revert via the version log, entity-link syntax."
+icon: "clock-rotate-left"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape), [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect)
+</Info>
+
+## Undo / Redo Model
+
+A single **`UndoSubsystem`** at `Scope.Session` owns undo state for the entire editor. It maintains a `Map<entityId, UndoStack>` — one stack per entity — and is queried by whichever editor surface is currently active.
+
+### Granularity and Lifetime
+
+- **Per-entity stacks.** Editing a dialogue graph builds up that dialogue's undo stack. Switching to the canvas and editing a canvas board builds up the board's stack independently. Switching back to the dialogue and pressing `Cmd+Z` pops the dialogue stack, unaffected by canvas edits.
+- **Survives mode switches.** Undo stacks persist for the lifetime of the Session. Closing a tab does not clear the stack; reopening the entity resumes where you left off (within session).
+- **Entity deletion archives the stack.** When an entity is deleted, its undo stack is archived for the duration of the session. `Cmd+Shift+T` ("reopen last closed tab") recreates the entity and restores the stack, so an accidental delete is recoverable.
+
+### Command Records
+
+Each editor surface produces typed `EditorCommand` records that the stack stores:
+
+```typescript
+export interface EditorCommand<T = unknown> {
+  entityId: string;
+  label: string;                 // human-readable: "Add node", "Move node 3"
+  apply(state: T): T;            // returns new state
+  undo(state: T): T;             // inverse
+  coalesceKey?: string;          // consecutive same-key commands merge
+  timestamp: number;
+}
+```
+
+Commands are small, pure transformations. They apply to an entity's `data` (and optionally `editor_metadata`). Coalescing merges rapid consecutive edits (e.g., 60 Hz position drags collapse into one undo step).
+
+### Interaction with Reference Extraction
+
+When `undo()` restores an entity to a prior state, the backend re-runs reference extraction on the restored `data` so the entity graph stays consistent. Backlinks from other entities to this one survive undo unchanged — the target entity still exists, just with different content.
+
+See ADR — Undo model (session-scoped, per-entity, survives mode switches).
+
+### Per-client scope
+
+Undo stacks live in the browser (or engine plugin) Session — they are **per-client**, not shared. `Cmd+Z` in one tab does not undo another tab's edits. Under [ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab)'s optimistic-concurrency model there is no server-side undo: a user who wants to revert a prior server state uses the history endpoint ([ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)) — `Cmd+Shift+R` or the Inspector's "History" drawer — which writes a new entity version whose data equals a chosen prior version. That forward-revert is visible to all clients via the sync event stream ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)) and is itself undoable in the acting client's session stack.
+
+
+## History and Revert
+
+Every entity carries an append-only version log ([ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)). The Inspector exposes a **History** drawer for the focused entity.
+
+### Drawer contents
+
+```
+History — Old Hermit
+────────────────────────────────────────
+v9  2026-04-20 15:31  you (browser)        [view] [revert]
+v8  2026-04-20 15:12  alex@ (plugin)       [view] [revert]
+v7  2026-04-20 14:58  you (browser)        [view] [revert]
+v6  2026-04-19 21:02  alex@ (cli)          [view] [revert]
+…
+```
+
+Each row is one `entity_versions` entry with `version`, `written_at`, `written_by`, `written_via`. Pagination uses the `?before=` cursor from `GET /api/projects/:pid/entities/:id/versions`.
+
+### Actions
+
+- **View** opens a read-only diff against the current version in a side panel. The diff highlights changed dotted paths (same shape as [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)'s `fields`).
+- **Revert** calls `POST /api/projects/:pid/entities/:id/revert { toVersion: N }`. The server writes a new version equal to v_N's `data` and `editor_metadata`; the response carries the new `version`. The sync event stream ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)) broadcasts the write to every connected client.
+- A revert is itself a write, so it participates in the conflict contract: if another client wrote between the user opening History and clicking Revert, the revert returns a 409 and the drawer re-fetches.
+
+### Keyboard
+
+`Cmd+Shift+H` opens the History drawer. `Cmd+Shift+R` inside the drawer reverts to the currently selected row after a confirmation.
+
+### Distinction from session undo
+
+- **Session undo (`Cmd+Z`):** fine-grained editor commands, local to one browser tab, lost on tab close. Ideal for "I just dragged the wrong node — take that back."
+- **History revert (drawer):** coarse, per-entity-write, server-side, cross-client. Ideal for "three hours ago this NPC was fine; roll back to that."
+
+
+## Write Conflicts
+
+Every entity write carries `If-Match: <version>` and can return `409 Conflict` in the shape defined by [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape). The editor surfaces conflicts through a modal, never silently:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  This entity changed since you opened it.                         │
+│                                                                   │
+│  Old Hermit (Character) — v7 → v9                                 │
+│                                                                   │
+│  Changed fields (on the server):                                  │
+│   • data.bio                                                      │
+│   • data.attributes.wisdom                                        │
+│                                                                   │
+│  Updated 2026-04-20 15:31 by alex@ (browser)                      │
+│                                                                   │
+│   ┌─────────────────┐  ┌─────────────────┐  ┌────────────────┐  │
+│   │  Keep yours     │  │  Discard yours  │  │ Open side-by-  │  │
+│   │  (force-write)  │  │  (reload v9)    │  │ side           │  │
+│   └─────────────────┘  └─────────────────┘  └────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Actions
+
+- **Keep yours (force-write):** re-fetches the server's current version, applies the user's in-flight patch against it, and PATCHes with the new `If-Match`. If fields overlap, the user's values win on those paths. Requires an `X-Alumic-Force-Overwrite: true` header so the backend logs the overwrite.
+- **Discard yours (reload):** drops the user's pending edits and reloads the entity at the server's current version. The session undo stack retains the discarded commands so the user can re-apply them manually.
+- **Open side-by-side:** opens a two-panel view with the user's version on the left and the server's on the right. Per-field "take mine / take theirs" toggles produce a merged patch that is then written with `If-Match` at the server's current version.
+
+### Copy and telemetry
+
+The modal copy uses the `currentUpdatedBy` shape from [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape) to name the other writer by user and client kind ("alex@ (browser)", "alex@ (plugin)", "ci-bot (cli)"). Every conflict resolution emits a telemetry event (`editor.conflict.resolved` with `{ entityId, choice }`) so conflict frequency is observable.
+
+### Inline conflict indicator
+
+Before a modal fires, the Inspector shows a subtle "↻ This entity changed on the server" banner with a Refresh button whenever an `EntityUpdated` event arrives for the currently focused entity while the user has pending edits. The banner lets the user choose to reconcile *before* they try to save. Clicking it acts like Discard yours.
+
+
+## Offline Mode
+
+Offline is a first-class state per [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect). The editor degrades gracefully instead of blocking edits.
+
+### Transition
+
+- The editor polls the sync event stream ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)). A failed fetch or a dropped SSE connection that does not reconnect within `15s` flips the editor into **Offline** state.
+- On transition: `EditorOfflineEntered` fires on the Alumic-side event bus, the Status Bar turns amber, and a persistent banner appears below the Breadcrumbs:
+
+```
+◂ ▸  Project  ›  Forest Zone  ›  Old Hermit                [⌘K]
+⚠ Offline — 3 changes pending   [ Retry now ]   [ Review queue ]
+```
+
+### Outbox
+
+Writes while offline queue to an **outbox** backed by IndexedDB, keyed by `writeId` ([ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect)). Each entry holds `{ writeId, entityId, patch, expectedVersion, createdAt }`. The pending-count badge on the banner reflects outbox depth.
+
+- **Review queue** opens a drawer listing every queued write with entity name, timestamp, and a "Discard" affordance. Discarding drops the entry and restores the entity in the editor to its last-synced version.
+- Entries older than 24 hours ([ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect)) are marked "Stale" and force a Review prompt before replay.
+
+### Reconnect
+
+- On successful reconnect, the banner switches to "Reconnecting — replaying 3 changes…"
+- Outbox entries replay in FIFO order against the server. Each successful replay clears one entry.
+- A 409 during replay surfaces the write-conflict modal (see above), scoped to that one entry. "Keep yours" force-writes; "Discard yours" drops the entry; "Open side-by-side" merges. The replay pauses until the user chooses, then continues with the next entry.
+- On completed replay the banner clears and `EditorOnlineReturned` fires.
+
+### Read semantics offline
+
+Reads serve from the session-scoped entity cache ([Entity Graph](/reference/entity-graph) Prefetch) plus the last-seen versions the editor has already fetched. An entity the user never opened while online is unavailable offline; the inspector shows "Not cached — unavailable offline."
+
+### Telemetry
+
+`editor.offline.entered`, `editor.offline.write_queued`, `editor.offline.replayed`, `editor.offline.stale_discarded` emit so offline quality is observable.
+
+
+## Entity Link Syntax in Documents
+
+Lore documents and other rich-text fields support inline entity references using a link syntax:
+
+```markdown
+The [[old-hermit|Old Hermit]] has lived in the [[forest-clearing|Forest Clearing]]
+for centuries. He was once a member of the [[silver-order|Silver Order]], before
+the [[great-schism|Great Schism]] tore the order apart.
+```
+
+Syntax: `[[entity-id|Display Text]]`
+
+In the document editor, these render as clickable chips. Clicking navigates to the referenced entity. The editor provides autocomplete when typing `[[`:
+
+```
+[[ her
+  Old Hermit (Character)
+  Hermit's Quest (Quest)
+  Hermit's Hut (Location)
+```
+
+Broken links (referencing deleted entities) are highlighted in red.
+
+
+## Phasing
+
+| Feature | Phase |
+|---------|-------|
+| Entity Browser (type-grouped, search) | Phase 3 |
+| Inspector (properties only) | Phase 3 |
+| Main viewport with entity-type editors | Phase 3 |
+| Inspector references + backlinks | Phase 4 |
+| Tab bar with peek/persist | Phase 4 |
+| Focus stack + breadcrumbs | Phase 4 |
+| Split views | Phase 4 |
+| Layout presets | Phase 4 |
+| Command palette | Phase 4 |
+| Document entity links | Phase 4 |
+| Custom editor registration | Phase 4 |
+
+The shell scaffolding (three columns, entity browser, viewport, inspector) arrives in Phase 3 alongside the first creative tools. The full navigation system (tabs, splits, breadcrumbs, command palette) lands in Phase 4 when the editor becomes the primary workflow.

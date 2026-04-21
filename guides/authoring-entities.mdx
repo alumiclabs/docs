@@ -1,0 +1,26 @@
+---
+title: "Authoring Entities"
+description: "Create, edit, and reference entities across the graph."
+icon: "pen"
+---
+
+{/* This guide will be expanded with step-by-step authoring walkthroughs. */}
+
+Every piece of authored content in Alumic is an **entity** — a typed row in a project-scoped database with `data`, `editor_metadata`, `tags`, and a monotonic `version`. Characters, dialogues, locations, scenes, items, abilities, UI layouts, canvas boards, and issues are all entity types.
+
+For now, head to the reference pages:
+
+<CardGroup cols={2}>
+  <Card title="Entity graph" icon="share-nodes" href="/reference/entity-graph">
+    The connective tissue — references, backlinks, navigation.
+  </Card>
+  <Card title="Entity types and extractors" icon="table-columns" href="/reference/entity-types-and-extractors">
+    `defineEntityType`, the FieldType enum, reference extractors.
+  </Card>
+  <Card title="Entity database" icon="database" href="/reference/entity-database">
+    Query API, session-scoped cache, persistence, change events.
+  </Card>
+  <Card title="Data formats" icon="file-code" href="/reference/data-formats">
+    `.entity.json` on-disk shape and the three-layer separation.
+  </Card>
+</CardGroup>

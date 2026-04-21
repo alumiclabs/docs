@@ -1,0 +1,35 @@
+---
+title: "ADR-022: koota adoption deferred until 1.0"
+description: "Phase 2 ships **`@alumic/ecs` with its interface and an in-memory reference implementation only**."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The research recommended koota as the default ECS backend for `@alumic/ecs`, backed by its active 2026 development and ISC license. koota is pre-1.0, and pre-1.0 libraries can ship breaking changes without warning.
+
+Phase 2 was originally scoped to include both `@alumic/ecs` (the backend-agnostic interface) and `@alumic/ecs-koota` (the koota-backed implementation). Shipping against a pre-1.0 dependency risks Phase 2 stability — a koota breaking change mid-Phase-2 would force either pinning to an obsolete version or rewriting.
+
+## Decision
+
+Phase 2 ships **`@alumic/ecs` with its interface and an in-memory reference implementation only**. `@alumic/ecs-koota` is deferred until koota reaches 1.0 (or a stable 0.x release the maintainers commit to supporting).
+
+The in-memory reference backend is not a production choice; it exists to validate the `@alumic/ecs` interface shape and let template authors build against the interface. Once koota stabilizes or bitECS (Phase 5) becomes the preferred backend, the reference implementation is replaced.
+
+## Consequences
+
+**Enables:** Phase 2 stays stable. `@alumic/ecs` interface discipline matures in Phase 2-3 so that adopting either koota or bitECS later is a pure implementation swap.
+
+**Obligates:** The `@alumic/ecs` interface must be stable before any backend is adopted; interface churn that requires backend rewrites is not an option. The in-memory reference backend must implement the `FieldType` surface ([ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed)) faithfully.
+
+**Forecloses:** Production ECS workloads in Phase 2. Templates that genuinely need a high-performance ECS (large entity counts, particle systems, grid simulations) wait for Phase 3+ or Phase 5.
+
+**Risk mitigation:** If koota never reaches 1.0 or goes unmaintained, bitECS (Phase 5 backend in the original roadmap) is a drop-in replacement behind the `@alumic/ecs` interface.
+
+## Related
+
+- Specs: [Architecture](/reference/architecture), [Roadmap](/concepts/roadmap)
+- Findings resolved: audit-1 D3.
+- Depends on: [ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed).

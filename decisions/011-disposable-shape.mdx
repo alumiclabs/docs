@@ -1,0 +1,40 @@
+---
+title: "ADR-011: Disposable is a bare cleanup function"
+description: "```ts"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The `Disposable` type was used in at least three places — plugin `build()` return value, scheduler `schedule()`, event bus `subscribe()` — but never defined. Three plausible shapes:
+
+1. `type Disposable = () => void` — bare cleanup function.
+2. `interface Disposable { dispose(): void }` — method-bearing object.
+3. `interface Disposable { [Symbol.dispose](): void }` — TC39 Explicit Resource Management, works with `using` syntax in TS 5.2+.
+
+The spec's own code samples used (1) throughout (`const unsub = channel.on(handler); unsub();`). (3) is interoperable with `using` but requires wrapping every cleanup function. (2) is an unnecessary middle ground.
+
+## Decision
+
+```ts
+export type Disposable = () => void;
+```
+
+Defined once in `@alumic/core` (exported from [Architecture](/reference/architecture)'s types section). All kernel APIs that return a cleanup handle return a bare function.
+
+If TS 5.2+ `using`-syntax interop becomes desirable later, a thin adapter can wrap `Disposable` in a `{ [Symbol.dispose]: Disposable }` shim without changing the core type.
+
+## Consequences
+
+**Enables:** The leanest possible cleanup shape. Authors write `return () => { ... }` from `build()`; subscribers call `unsub()` directly. Zero allocation beyond the closure.
+
+**Obligates:** If `using` syntax ships in editor tooling surfaces, a `using`-compatible wrapper must be provided alongside (`asUsing(d: Disposable)` or similar).
+
+**Forecloses:** Direct `using` binding without a wrapper. Acceptable because most Alumic cleanup happens at scope boundaries managed by the kernel, not in user-scoped `using` blocks.
+
+## Related
+
+- Specs: [Architecture](/reference/architecture), [Plugin System](/reference/plugin-system), [Writing a Plugin](/guides/writing-a-plugin), [App Lifecycle](/reference/app-lifecycle), [Event Bus](/reference/event-bus)
+- Findings resolved: audit-1 B2.

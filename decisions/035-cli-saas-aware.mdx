@@ -1,0 +1,46 @@
+---
+title: "ADR-035: CLI is SaaS-aware by default"
+description: "The Alumic CLI is **SaaS-aware by default**."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+`alumic create my-game --template topdown-action` was described with three incompatible implied behaviors across specs 00, 17, and 20: a local scaffolder (npm-style), a marketplace fetch + local workspace, and a hybrid that mints a SaaS project. Readers picked one arbitrarily.
+
+Under [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first) and [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), a created project without a server-issued UUID is an orphan.
+
+## Decision
+
+The Alumic CLI is **SaaS-aware by default**. Every command authenticates (via PAT — [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth) — or a cached login token), operates against a configured backend URL, and treats the local working directory as a *mirror* of server state when one exists.
+
+Command map:
+
+| Command | Behavior |
+|---------|----------|
+| `alumic login` | Opens device-flow login or prompts for a PAT; writes `~/.alumic/credentials`. |
+| `alumic create <name> --template <t>` | Mints a project on the server, fetches template bundle, writes local workspace with `project.json` stamped. |
+| `alumic pull` | Fetches entity state into `data/entities/`. Respects `project.json`. |
+| `alumic push` | Validates and writes local `data/entities/` to the server via the entity API. Uses `If-Match` ([ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)). |
+| `alumic validate` | Local file-only validation; server does the same on write ([ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)). Useful for pre-commit hooks. |
+| `alumic extract-strings` | Local file-only extraction; server does this on save ([ADR-008 Line IDs are author-written; CLI extracts .strings.csv](/decisions/008-line-ids-authored)). Useful for offline authoring. |
+| `alumic publish` | Publishes a plugin or template to the marketplace ([ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4)); runs transpile ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side)). |
+| `alumic export` | Emits the project as a file-shaped directory (for on-prem seeding or Git workflows). |
+
+An `--offline` flag on `create`, `push`, `pull` defers server interaction. Offline `create` leaves `project.json` un-stamped; a subsequent online `push` mints the UUID.
+
+## Consequences
+
+**Enables:** One mental model — the CLI is a SaaS client just like the browser editor. Git workflows live as `export`/`import` round-trips. Power users drive SaaS from their terminal.
+
+**Obligates:** The CLI ships alongside the backend. Backend URL configurable via `--server` or `ALUMIC_SERVER_URL`. Credentials are cached; `alumic logout` removes them.
+
+**Forecloses:** A pure-local CLI that never talks to a server. On-prem users point the CLI at their on-prem URL; `--offline` handles genuinely disconnected use.
+
+## Related
+
+- Specs: [Project Structure](/guides/project-structure), [Template System](/reference/template-system), [CLI](/guides/cli), [Validation](/guides/validation), [Testing](/guides/testing), [Debugging](/guides/debugging)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth).
+- Informs: [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect).

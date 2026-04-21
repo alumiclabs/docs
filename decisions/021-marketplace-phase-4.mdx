@@ -1,0 +1,46 @@
+---
+title: "ADR-021: Templates and plugins distributed via Alumic marketplace (Phase 4)"
+description: "**Both templates and plugins distribute through the Alumic marketplace (Phase 4).** The marketplace is a backend-served registry with:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The research originally framed plugins as npm packages with a `package.json` `alumic` subkey for discovery. [ADR-007 Plugin identity lives in code via definePlugin()](/decisions/007-plugin-identity-in-code) rejected the subkey and canonicalized `definePlugin()` for plugin identity. Distribution was left open.
+
+Two forces reshape the decision under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)):
+
+1. **Pure-SaaS studios never run `npm install`.** A studio that only uses alumic.app has no local development environment; npm-based plugin distribution forecloses plugin use for those customers.
+2. **Templates bundle seed entities.** A template like `topdown-action` ships plugin composition *and* sample dialogue graphs, items, characters. Installing a template requires both package installation and entity-database seeding.
+
+Keeping plugins on npm while putting templates in an Alumic marketplace creates a two-path ecosystem. Unifying them in one marketplace lets both SaaS and on-prem users install either.
+
+## Decision
+
+**Both templates and plugins distribute through the Alumic marketplace (Phase 4).** The marketplace is a backend-served registry with:
+
+- Browse, search, filter by category/tag.
+- Install into a project (plugin: added to project's plugin list and loaded on boot; template: creates new project with seed entities).
+- Semver-based versioning; pinned versions per project.
+- Publish pipeline with moderation queue (at least for initial launch) and automated schema/code sanity checks.
+- On-prem deployments can mirror the marketplace or point at a self-hosted registry.
+
+Phase 1-3 ships **first-party templates and plugins only**, bundled with the repo and seeded into the backend at install time. These become the marketplace's initial entries when it launches in Phase 4.
+
+npm remains a **secondary channel** for CI/bundler workflows and plugin developers who prefer npm tooling. The marketplace can import from npm on publish if the author chooses.
+
+## Consequences
+
+**Enables:** One discovery surface for both templates and plugins. SaaS users install with a click. On-prem gets the same stack. Marketplace is a natural revenue/ecosystem-growth layer in Phase 4+.
+
+**Obligates:** Marketplace infrastructure (moderation, versioning, security scanning, storage, ratings if added) becomes part of Phase 4 scope. First-party templates must be marketplace-ready before launch.
+
+**Forecloses:** npm-only plugin distribution. Contributors publishing an Alumic plugin publish to the marketplace as the primary channel.
+
+## Related
+
+- Specs: [Template System](/reference/template-system), [Roadmap](/concepts/roadmap)
+- Findings resolved: audit-2 #06 (partial), implicit in audit-1 A3.
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-007 Plugin identity lives in code via definePlugin()](/decisions/007-plugin-identity-in-code).

@@ -1,0 +1,83 @@
+---
+title: "Sync Protocol"
+description: "Snapshot + event stream, cursor semantics, push transports."
+icon: "satellite-dish"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect)
+</Info>
+
+## Live Sync
+
+Two transports, same cursor:
+
+- **Long poll:** `GET /api/projects/:pid/events?since=<cursor>` — returns up to N events or waits up to 30s for new ones. Good for proxies that strip SSE; the engine plugin's default.
+- **SSE:** `GET /api/projects/:pid/events?stream=sse` — continuous stream. Browser's default ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)).
+
+```mermaid
+sequenceDiagram
+  participant C as Client (browser / plugin / CLI)
+  participant B as Backend
+  participant DB as entity_versions table
+
+  Note over C: first run or stale mirror
+  C->>B: GET /api/projects/:pid/snapshot
+  B->>DB: stream all entity rows + latest lsn
+  DB-->>B: rows
+  B-->>C: NDJSON entities + cursor
+
+  loop live sync
+    C->>B: GET /events?since=cursor
+    B->>DB: SELECT lsn > cursor
+    alt changes pending
+      DB-->>B: events
+      B-->>C: entity.updated / deleted / asset.committed / schema.changed / proposal.* / agent.run.*
+      C->>C: apply to cache, advance cursor
+    else idle (30s)
+      B-->>C: heartbeat + same cursor
+    end
+  end
+
+  alt cursor older than retention window (410 Gone)
+    B-->>C: { error: "cursor-too-old", snapshotHint: "/snapshot" }
+    C->>B: GET /snapshot
+    Note over C: rebuild mirror from cold snapshot
+  end
+```
+
+Event payloads:
+
+```
+event: entity.updated
+data: { "entityId": "old-hermit", "type": "Character", "version": 17, "cursor": "018f..." }
+
+event: entity.deleted
+data: { "entityId": "orphan-1", "cursor": "018f..." }
+
+event: asset.committed
+data: { "assetId": "018f...", "sha256": "...", "cursor": "018f..." }
+
+event: schema.changed
+data: { "schemaVersion": "2026-04-21.1", "cursor": "018f..." }
+
+event: proposal.submitted
+data: { "proposalId": "018f...", "entityId": "old-hermit", "summary": "Fix missing bio", "proposerActorId": "agent:auto-editor", "agentRunId": "018f...", "cursor": "018f..." }
+
+event: proposal.reviewed
+data: { "proposalId": "018f...", "decision": "approve", "reviewerActorId": "01HR...", "cursor": "018f..." }
+
+event: proposal.accepted
+data: { "proposalId": "018f...", "entityId": "old-hermit", "newVersion": 9, "cursor": "018f..." }
+
+event: proposal.rejected
+data: { "proposalId": "018f...", "cursor": "018f..." }
+
+event: agent.run.started
+data: { "runId": "018f...", "agentId": "018f...", "cursor": "018f..." }
+
+event: agent.run.closed
+data: { "runId": "018f...", "status": "succeeded", "writeCount": 12, "cursor": "018f..." }
+```
+
+Clients persist the last-seen `cursor` and resume with `?since=<cursor>` after any interruption ([ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect)).

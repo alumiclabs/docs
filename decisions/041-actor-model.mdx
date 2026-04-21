@@ -1,0 +1,60 @@
+---
+title: "ADR-041: Actor model — users and agents as peers"
+description: "Every authoring surface attributes to an **Actor**."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Every [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)/013/032 write is attributed to a human user via `written_by` + `written_via ∈ {browser, plugin, cli, import}`. This works when all authors are people. It does not accommodate the near-future workflow the product is being designed for: LLMs, automation rules, and external agents doing substantial authoring work — increasingly, more than the humans.
+
+Three shapes were considered:
+
+1. **Light:** add `'agent'` to `written_via`; `written_by` still points to the human who launched the agent. Minimal change; agents are second-class and cannot own their own permissions, rate limits, or revocation.
+2. **Service account:** model agents as flagged `User` rows. Preserves schema; conflates humans and machines on one type, polluting role semantics and account-management UI.
+3. **Peer:** introduce `Actor` as the authoring identity. Every write carries `actor_id`; an actor resolves to a `User` or an `Agent`, each with its own row, credentials, permissions, rate limits, and audit chain. **Chosen.**
+
+## Decision
+
+Every authoring surface attributes to an **Actor**. `Actor` is a logical identity resolving to one of two concrete tables:
+
+- `User` — existing table (spec/19).
+- `Agent` — new table (Phase 3). Each row: `{ id, workspace_id, display_name, kind, owner_user_id, credential_hash, scopes, rate_limit_plan, created_at, revoked_at? }`. Agents are also registered as `Agent` entities (spec/28) so they participate in the entity graph.
+
+Schema changes on `entity_versions` (spec/19, extending [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)):
+
+```
+actor_id            UUID NOT NULL
+agent_run_id        UUID                 -- null for non-agent writes
+on_behalf_of_user_id UUID                -- null for user writes; for agent writes,
+                                         -- the human who triggered or owns the run
+written_via         TEXT NOT NULL        -- enum extended with 'agent'
+```
+
+`written_by` is retained for backwards compatibility and populated as `on_behalf_of_user_id` for agent writes; new code reads `actor_id`.
+
+Every agent invocation opens an `AgentRun` (spec/28). Writes emitted during the run carry its `agent_run_id`, making the run a unit of audit and revert ("revert run X" reverts every write tagged with that run_id via [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log) forward-revert).
+
+### Resolving actors in the API
+
+The Auth middleware (spec/19) resolves the `Authorization` header to a `{ actor_id, actor_kind: 'user' | 'agent', agent_run_id?, on_behalf_of_user_id?, clientKind, scopes }` tuple. Agent PATs ([ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth) extension) include the agent's ID in the token; creating an AgentRun is either implicit (first write opens a run) or explicit (`POST /api/agents/:id/runs`).
+
+### Migration
+
+Existing `entity_versions` rows backfill `actor_id := written_by` (cast to actor namespace), `actor_kind := 'user'`. No data loss. `written_via` values remain valid.
+
+## Consequences
+
+**Enables:** First-class non-human authorship. Per-agent permission scopes, per-agent metering ([ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag)), per-run revert, per-run budgets. Product UIs can surface "Claude-code proposed 12 writes across this run" as a single unit. Humans remain accountable via `on_behalf_of_user_id`.
+
+**Obligates:** Every write path, audit log, sync event, and UI attribution component resolves actor identity rather than user identity directly. Agent credentials require their own creation/revocation UI (spec/28). [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)'s PAT scope set extends with agent-specific scopes.
+
+**Forecloses:** A single-table "everyone is a user" shortcut. The small up-front cost buys a clean agentic future.
+
+## Related
+
+- Specs: [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints), [Permissions](/reference/permissions), [Project Management](/reference/project-management), [Actors and Agents](/reference/actors-and-agents)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log).
+- Informs: [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals), [ADR-043 Project-management entity types land Phase 3; automation Phase 4](/decisions/043-project-management-phase-3).

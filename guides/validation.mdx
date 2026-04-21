@@ -1,0 +1,115 @@
+---
+title: "Validation"
+description: "Zod schemas, ref-resolution, and authoring-time checks."
+icon: "shield-check"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)
+</Info>
+
+## Validation Pipeline
+
+### Overview
+
+Under SaaS-first ([ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)), validation runs **server-side on every write**. Authoring-time IDE checks and the `alumic validate` CLI are advisory — they run the same suite locally but are never authoritative. Runtime clients consume pre-validated data.
+
+```
+Authoring-Time (advisory)   Server on Write (authoritative)    Runtime (consume)
+┌─────────────┐             ┌──────────────────┐              ┌──────────────────┐
+│ IDE/Editor  │             │ POST/PATCH       │              │ ctx.entities.get │
+│             │             │ /api/entities    │              │                  │
+│ • JSON Schema│             │                  │              │ • Pre-validated  │
+│   validation │             │ • Zod parse      │              │   by server      │
+│ • TypeScript │             │ • Ref extract    │              │ • No Zod in hot  │
+│   type check │             │ • Link pass      │              │   path           │
+│ • Zod on save│             │ • Cycle detect   │              │                  │
+│              │             │ • Unreachable    │              │ • Optional dev   │
+│              │             │   node detect    │              │   re-validation  │
+│              │             │ • Duplicate IDs  │              │   (backend skew) │
+│              │             │ • Localization   │              │                  │
+│              │             │ • Tag validation │              │                  │
+└─────────────┘             └──────────────────┘              └──────────────────┘
+                                     │
+                                     ▼ on 4xx
+                            ┌──────────────────┐
+                            │ Structured error │
+                            │ ([Entity API](/reference/entity-api) envelope)   │
+                            │ surfaced to UI   │
+                            └──────────────────┘
+
+Offline / CI path:   alumic validate  — runs the same suite locally against file
+                     export. Convenient, but server re-runs on push.
+```
+
+### Authoring-Time Validation
+
+JSON Schema files enable IDE autocompletion and inline error detection:
+
+```json
+// .vscode/settings.json
+{
+  "json.schemas": [
+    {
+      "fileMatch": ["*.graph.json"],
+      "url": "./schemas/graph.schema.json"
+    },
+    {
+      "fileMatch": ["*.def.json"],
+      "url": "./schemas/def.schema.json"
+    }
+  ]
+}
+```
+
+TypeScript's type checker catches API misuse at compile time. Zod schemas can run on-save in editor plugins.
+
+### Build-Time Validation (CLI)
+
+```bash
+# Validate all data files
+bun run validate
+
+# Validate specific files
+bun run validate data/dialogues/*.graph.json
+```
+
+The validation CLI performs:
+
+1. **Schema validation** — Parse each file with its Zod schema
+2. **Graph link pass** — Verify all `targetNodeId` references resolve
+3. **Cycle detection** — Flag infinite loops (optionally allow marked cycles)
+4. **Unreachable node detection** — Nodes with no incoming edges (except entry)
+5. **Duplicate ID detection** — No ID collisions within a file
+6. **Localization completeness** — Every `lineId` has entries in `.strings.csv`
+7. **Tag validation** — Referenced tags exist in the tag registry
+8. **Asset validation** — Referenced asset IDs resolve. In `--offline` mode the CLI checks IDs against the exported `assets/manifest.json` ([Asset Management](/reference/asset-management)); online, it queries the backend. Asset references are entity IDs, not file paths ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)).
+
+Output format:
+
+```
+✓ data/dialogues/intro.graph.json — valid (5 nodes, 7 edges)
+✗ data/dialogues/shopkeeper.graph.json
+  ERROR: Node "node-007" references targetNodeId "node-099" which does not exist
+  WARN:  Node "node-003" is unreachable (no incoming edges)
+✓ data/items/weapons.def.json — valid (12 entries)
+✗ data/strings/en.strings.csv
+  ERROR: Missing translation for lineId "shop.farewell.002"
+
+2 errors, 1 warning in 4 files
+```
+
+### Runtime Validation (SaaS-first)
+
+Under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)), validation is **server-side on write**. The backend parses each entity payload against its Zod schema before persisting. Clients fetch pre-validated data and skip the Zod parse in the hot path.
+
+```typescript
+// Client: entity arrives pre-validated from the API
+const entity = await api.getEntity(id);
+// Optionally re-validate in dev builds to catch backend version skew
+if (import.meta.env.DEV) {
+  EntitySchema.parse(entity);
+}
+```
+
+The file-import pipeline (`alumic import`, on-prem seeding) runs the same server-side validation on ingest. The build-time `alumic validate` CLI is still useful when authoring files offline or checking a repo before commit.

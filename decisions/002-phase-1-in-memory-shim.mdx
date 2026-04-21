@@ -1,0 +1,31 @@
+---
+title: "ADR-002: Phase 1 uses an in-memory entity-db shim; backend lands Phase 2"
+description: "Phase 1 ships with an in-memory (optionally IndexedDB-persisted) implementation of `EntityDatabase` behind the same interface the Phase 2 backend will implement."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first) commits Alumic to SaaS-first, which normally implies shipping the backend (Fastify + Postgres + entity CRUD API + auth) before anything else. But Phase 1's milestone — "`bun dev` produces a running browser scene with a moving cube" in 6-8 weeks — is achievable only if the kernel, renderer, input, and first template can be built and tested without backend infrastructure in place.
+
+The options: (a) extend Phase 1 by 4-6+ weeks to include the backend skeleton, (b) defer SaaS-shaped interfaces and rewrite in Phase 2, or (c) design async-remote-friendly interfaces from day one, ship Phase 1 with an in-memory implementation behind those interfaces, then drop in the real backend in Phase 2.
+
+## Decision
+
+Phase 1 ships with an in-memory (optionally IndexedDB-persisted) implementation of `EntityDatabase` behind the same interface the Phase 2 backend will implement. Reads and writes are async throughout. Phase 2 replaces the implementation with Fastify + Postgres; zero rewrite cost at the call site.
+
+## Consequences
+
+**Enables:** Phase 1 ships a runnable framework on schedule without premature backend scope. Interface discipline (async, no synchronous file I/O, no module-local state that presumes single-process) is forced from the start.
+
+**Obligates:** Phase 1 interface design must be reviewed against the expected Phase 2 backend shape (pagination, optimistic concurrency tokens, streaming query support if needed). Otherwise the shim ships an interface that will leak when it meets the real backend.
+
+**Neutral:** Phase 1 remains offline-capable; the shim works without a network. Tests use the shim by default.
+
+## Related
+
+- Specs: [App Lifecycle](/reference/app-lifecycle), [Roadmap](/concepts/roadmap), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first).
+- Informs: [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation).

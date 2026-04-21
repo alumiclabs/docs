@@ -1,0 +1,37 @@
+---
+title: "ADR-012: Scheduler appends scene-scope systems to end of phase"
+description: "Scene-scope (and Session- and Player-scope) `tick()` functions registered via subsystem `init()` are **appended to the end of their phase** at scope-push time."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The scheduler's execution-order rule ([Scheduler](/reference/scheduler)) states systems within a phase run in insertion order, and since plugins build in topological dependency order at boot time, cross-plugin ordering resolves naturally.
+
+At boot, this is well-defined. But Scene-scope subsystems register their `tick()` functions when a scene is pushed, potentially long after boot — inserting into an already-populated phase list at some unspecified position. Two implementations:
+
+1. **Append to end of phase** (new systems always go last).
+2. **Re-interleave by plugin dependency topology** (re-sort on every push).
+
+(2) is expensive and can shuffle existing systems unpredictably. (1) is simple and predictable but means a late-registering Scene system sees sibling systems in boot-time order regardless of Scene-time dependencies.
+
+## Decision
+
+Scene-scope (and Session- and Player-scope) `tick()` functions registered via subsystem `init()` are **appended to the end of their phase** at scope-push time. Dependency-order interleaving applies only to boot-time registration.
+
+Plugins whose Scene subsystems have hard ordering requirements relative to other plugins' Scene subsystems must express those through their plugin-level `dependencies` list — but the scheduler only guarantees *boot-level* ordering will honor those dependencies. Scene-time ordering is append-only.
+
+## Consequences
+
+**Enables:** Cheap, predictable scene pushes. No scheduler-internal resort on every scope transition. Works for the overwhelmingly common case where scene subsystems are independent.
+
+**Obligates:** The rule must be documented in both [Subsystem Hierarchy](/reference/subsystem-hierarchy) and [Scheduler](/reference/scheduler). If a plugin truly needs dependency-ordered scene ticks, the plugin author must run `ctx.get(depSubsystem)` in their own `init()` rather than rely on scheduler order.
+
+**Forecloses:** Cross-plugin Scene-time ordering that requires re-interleaving. An advanced plugin could implement its own scheduling layer on top if needed.
+
+## Related
+
+- Specs: [Subsystem Hierarchy](/reference/subsystem-hierarchy), [Scheduler](/reference/scheduler)
+- Findings resolved: audit-2 #15.

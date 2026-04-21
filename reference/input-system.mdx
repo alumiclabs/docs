@@ -1,0 +1,390 @@
+---
+title: "Input System"
+description: "Leafwing-inspired action/binding split; buttons, axes, axis2D."
+icon: "gamepad"
+---
+
+## Overview
+
+`@alumic/input` provides a **leafwing-inspired input manager** that maps raw device inputs (keyboard, mouse, gamepad) to named game actions. The system decouples game logic from specific key bindings — a "jump" action can be bound to Spacebar, a gamepad button, or a screen tap without changing game code.
+
+## Core Concepts
+
+### Actions vs Bindings
+
+- **Action** — A named game intent: `"MoveForward"`, `"Attack"`, `"Interact"`, `"Pause"`
+- **Binding** — A mapping from a physical input to an action: `"KeyW" → MoveForward`, `"GamepadLeftStickY" → MoveForward`
+
+Game logic references actions. Players configure bindings.
+
+### Action Types
+
+| Type | Description | Example |
+|------|-------------|---------|
+| **Button** | Pressed/released state | Jump, Attack, Interact, Pause |
+| **Axis** | Continuous -1 to 1 value | Move X, Move Y, Camera Yaw |
+| **Axis2D** | Two-axis vector (x, y) | Movement (combined), Camera Look |
+
+## Defining Actions
+
+```typescript
+import { defineAction, defineInputSchema } from '@alumic/input';
+
+// Define individual actions
+export const MoveForward = defineAction('MoveForward', {
+  type: 'axis',
+  deadzone: 0.1,
+});
+
+export const MoveRight = defineAction('MoveRight', {
+  type: 'axis',
+  deadzone: 0.1,
+});
+
+export const Move = defineAction('Move', {
+  type: 'axis2d',
+  deadzone: 0.15,
+});
+
+export const Attack = defineAction('Attack', {
+  type: 'button',
+});
+
+export const Interact = defineAction('Interact', {
+  type: 'button',
+});
+
+export const Pause = defineAction('Pause', {
+  type: 'button',
+  consumeInput: true, // prevents this input from firing other actions
+});
+
+// Group actions into a schema (an input context)
+export const GameplayInput = defineInputSchema('Gameplay', {
+  actions: [Move, Attack, Interact, Pause],
+  defaultBindings: {
+    Move: [
+      { device: 'keyboard', keys: ['KeyW', 'KeyS', 'KeyA', 'KeyD'] },
+      { device: 'gamepad', stick: 'left' },
+    ],
+    Attack: [
+      { device: 'keyboard', key: 'Space' },
+      { device: 'mouse', button: 'left' },
+      { device: 'gamepad', button: 'A' },
+    ],
+    Interact: [
+      { device: 'keyboard', key: 'KeyE' },
+      { device: 'gamepad', button: 'X' },
+    ],
+    Pause: [
+      { device: 'keyboard', key: 'Escape' },
+      { device: 'gamepad', button: 'Start' },
+    ],
+  },
+});
+
+export const MenuInput = defineInputSchema('Menu', {
+  actions: [
+    defineAction('Navigate', { type: 'axis2d' }),
+    defineAction('Confirm', { type: 'button' }),
+    defineAction('Cancel', { type: 'button' }),
+  ],
+  defaultBindings: {
+    Navigate: [
+      { device: 'keyboard', keys: ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'] },
+      { device: 'gamepad', stick: 'left' },
+      { device: 'gamepad', dpad: true },
+    ],
+    Confirm: [
+      { device: 'keyboard', key: 'Enter' },
+      { device: 'gamepad', button: 'A' },
+    ],
+    Cancel: [
+      { device: 'keyboard', key: 'Escape' },
+      { device: 'gamepad', button: 'B' },
+    ],
+  },
+});
+```
+
+## API
+
+### Action State
+
+```typescript
+export interface ButtonState {
+  /** True during the frame the button was pressed. */
+  readonly justPressed: boolean;
+
+  /** True while the button is held down. */
+  readonly pressed: boolean;
+
+  /** True during the frame the button was released. */
+  readonly justReleased: boolean;
+
+  /** How long the button has been held (seconds). 0 if not pressed. */
+  readonly holdDuration: number;
+}
+
+export interface AxisState {
+  /** Current axis value (-1 to 1). 0 when inside deadzone. */
+  readonly value: number;
+
+  /** Raw value before deadzone processing. */
+  readonly rawValue: number;
+}
+
+export interface Axis2DState {
+  /** Current 2D vector. */
+  readonly x: number;
+  readonly y: number;
+
+  /** Magnitude of the vector (0 to 1). */
+  readonly length: number;
+
+  /** Normalized direction (unit vector). Undefined if length is 0. */
+  readonly normalized: { x: number; y: number } | undefined;
+}
+```
+
+### Input Manager
+
+```typescript
+export const InputSubsystem = defineSubsystem<InputManager>(
+  Scope.App,
+  (ctx) => ({
+    init() {
+      return new InputManager(ctx);
+    },
+    tick(mgr, tick) {
+      mgr.poll(tick.dt);
+    },
+    tickPhase: Phase.PreUpdate,
+    deinit(mgr) {
+      mgr.dispose();
+    },
+  }),
+);
+
+export class InputManager {
+  /**
+   * Push an input context onto the stack.
+   * The top context receives input; lower contexts are blocked.
+   */
+  pushContext(schema: InputSchema): void;
+
+  /** Pop the top input context. */
+  popContext(): void;
+
+  /** Replace the top input context. */
+  replaceContext(schema: InputSchema): void;
+
+  /** Get the current active input context. */
+  readonly activeContext: InputSchema | null;
+
+  /**
+   * Query a button action's state.
+   * @example
+   * if (input.button(Attack).justPressed) { startAttack(); }
+   */
+  button(action: ActionHandle): ButtonState;
+
+  /**
+   * Query an axis action's value.
+   * @example
+   * const forward = input.axis(MoveForward).value;
+   */
+  axis(action: ActionHandle): AxisState;
+
+  /**
+   * Query a 2D axis action's value.
+   * @example
+   * const move = input.axis2d(Move);
+   * entity.position.x += move.x * speed * dt;
+   * entity.position.z += move.y * speed * dt;
+   */
+  axis2d(action: ActionHandle): Axis2DState;
+
+  /**
+   * Rebind an action to different inputs.
+   * Used for key rebinding UI.
+   */
+  rebind(action: ActionHandle, bindings: Binding[]): void;
+
+  /** Get current bindings for an action. */
+  getBindings(action: ActionHandle): readonly Binding[];
+
+  /** Reset all bindings to defaults. */
+  resetBindings(): void;
+
+  /** Start listening for the next input (for rebinding UI). */
+  listenForInput(): Promise<RawInput>;
+
+  /** Internal: poll all devices and update action states. */
+  poll(dt: number): void;
+
+  /** Dispose event listeners. */
+  dispose(): void;
+}
+```
+
+## Input Contexts
+
+Input contexts are stacked. The top context receives input; lower contexts are blocked. This enables seamless transitions between gameplay, menus, dialogue, and other input modes.
+
+```typescript
+// Gameplay starts
+input.pushContext(GameplayInput);
+// WASD moves the character, Space attacks
+
+// Player opens inventory
+input.pushContext(MenuInput);
+// Arrow keys navigate menu, Enter confirms, Escape goes back
+// Gameplay input is blocked
+
+// Player closes inventory
+input.popContext();
+// Back to GameplayInput
+```
+
+### Context Stack Behavior
+
+| Scenario | Stack | Active Context |
+|----------|-------|---------------|
+| Game starts | `[Gameplay]` | Gameplay |
+| Open menu | `[Gameplay, Menu]` | Menu |
+| Open sub-menu | `[Gameplay, Menu, SubMenu]` | SubMenu |
+| Close sub-menu | `[Gameplay, Menu]` | Menu |
+| Close menu | `[Gameplay]` | Gameplay |
+| Start dialogue | `[Gameplay, Dialogue]` | Dialogue |
+
+## Binding Types
+
+```typescript
+export type Binding =
+  | KeyboardBinding
+  | MouseBinding
+  | GamepadBinding
+  | TouchBinding;
+
+export interface KeyboardBinding {
+  device: 'keyboard';
+  /** Single key for button actions. */
+  key?: string;
+  /** Four keys [up, down, left, right] for axis2D actions. */
+  keys?: [string, string, string, string];
+  /** Two keys [negative, positive] for axis actions. */
+  axisPair?: [string, string];
+  /** Modifier keys required. */
+  modifiers?: Array<'Shift' | 'Control' | 'Alt' | 'Meta'>;
+}
+
+export interface MouseBinding {
+  device: 'mouse';
+  button?: 'left' | 'right' | 'middle';
+  axis?: 'x' | 'y' | 'wheel';
+  sensitivity?: number;
+}
+
+export interface GamepadBinding {
+  device: 'gamepad';
+  button?: string;        // Standard Gamepad API button name
+  stick?: 'left' | 'right';
+  stickAxis?: 'x' | 'y';
+  trigger?: 'left' | 'right';
+  dpad?: boolean;
+}
+
+export interface TouchBinding {
+  device: 'touch';
+  /** Virtual joystick zone. */
+  zone?: 'left' | 'right' | 'full';
+  /** Tap region for button actions. */
+  region?: { x: number; y: number; width: number; height: number };
+}
+```
+
+## Event Channels
+
+```typescript
+export const ActionPressed = defineChannel<{
+  action: string;
+  device: 'keyboard' | 'mouse' | 'gamepad' | 'touch';
+}>('Input.Action.Pressed');
+
+export const ActionReleased = defineChannel<{
+  action: string;
+  device: 'keyboard' | 'mouse' | 'gamepad' | 'touch';
+}>('Input.Action.Released');
+
+export const ContextChanged = defineChannel<{
+  previous: string | null;
+  current: string | null;
+}>('Input.Context.Changed');
+
+export const DeviceConnected = defineChannel<{
+  device: 'keyboard' | 'mouse' | 'gamepad' | 'touch';
+  index?: number;
+}>('Input.Device.Connected');
+
+export const DeviceDisconnected = defineChannel<{
+  device: 'keyboard' | 'mouse' | 'gamepad' | 'touch';
+  index?: number;
+}>('Input.Device.Disconnected');
+```
+
+## Deadzone Processing
+
+Axis values pass through deadzone processing before reaching game code:
+
+```
+Raw value from device: -1.0 to 1.0
+                │
+                ▼
+        ┌───────────────┐
+        │  Inner Deadzone│  If |raw| < deadzone → 0
+        │  (e.g., 0.15) │
+        └───────────────┘
+                │
+                ▼
+        ┌───────────────┐
+        │  Remap to     │  Remap [deadzone, 1.0] → [0.0, 1.0]
+        │  0.0 - 1.0    │  Preserves sign
+        └───────────────┘
+                │
+                ▼
+        Final value: -1.0 to 1.0 (0 in deadzone)
+```
+
+## Usage in Game Code
+
+```typescript
+// In a system function
+ctx.schedule(Phase.Update, (tick) => {
+  const input = ctx.get(InputSubsystem);
+
+  // Movement
+  const move = input.axis2d(Move);
+  if (move.length > 0) {
+    player.position.x += move.x * SPEED * tick.dt;
+    player.position.z += move.y * SPEED * tick.dt;
+    player.rotation.y = Math.atan2(move.x, move.y);
+  }
+
+  // Attack
+  if (input.button(Attack).justPressed) {
+    startAttack(player);
+  }
+
+  // Interact
+  if (input.button(Interact).justPressed) {
+    const nearby = findNearbyInteractable(player);
+    if (nearby) interact(nearby);
+  }
+
+  // Pause
+  if (input.button(Pause).justPressed) {
+    togglePauseMenu();
+  }
+}, 'PlayerController');
+```

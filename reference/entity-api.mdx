@@ -1,0 +1,171 @@
+---
+title: "Entity API"
+description: "HTTP surface for entities: routes, headers, error envelope."
+icon: "network-wired"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth), [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals), [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect), [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag), [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-037 Plugin-defined schemas, extractors, and migrations ship as publish artifacts](/decisions/037-plugin-schema-registration)
+</Info>
+
+## The Entity API
+
+Every authored artifact — Character, Dialogue, Scene, CanvasBoard, UILayout, Asset, etc. — is an entity ([Entity Graph](/reference/entity-graph)) served via a uniform REST surface.
+
+### Routes
+
+```
+# Identity
+POST   /api/auth/login              — email/password → JWT ([ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing))
+POST   /api/auth/refresh            — refresh JWT
+POST   /api/auth/logout
+GET    /api/me                      — current user + workspace list
+POST   /api/pats                    — create PAT ([ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth))
+GET    /api/pats                    — list current user's PATs
+DELETE /api/pats/:id                — revoke PAT
+
+# Device flow (Phase 3; engine plugin first-run & CLI login) — [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)
+POST   /api/auth/device             — start device flow → { deviceCode, userCode, verificationUrl, interval }
+POST   /api/auth/device/token       — poll for PAT issuance → { token } | 400 authorization_pending
+
+# Workspaces & projects
+GET    /api/workspaces              — workspaces the user belongs to
+GET    /api/workspaces/:id/projects — projects in a workspace
+POST   /api/workspaces/:id/projects — create project (mints UUID — [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid))
+GET    /api/workspaces/:id/members        — list workspace members (owner/editor)
+POST   /api/workspaces/:id/members        — add member (owner only)
+PATCH  /api/workspaces/:id/members/:uid   — change workspace role (owner only)
+DELETE /api/workspaces/:id/members/:uid   — remove member (owner only)
+GET    /api/projects/:id            — project metadata
+DELETE /api/projects/:id            — archive project
+GET    /api/projects/:id/members          — list project-role overrides ([Permissions](/reference/permissions))
+POST   /api/projects/:id/members          — set project-role override (owner only)
+DELETE /api/projects/:id/members/:uid     — clear project-role override
+
+# Entities (scoped to project)
+GET    /api/projects/:pid/entities?type=X&tag=Y&page=Z  — paginated list
+GET    /api/projects/:pid/entities?ids=a,b,c            — batch fetch by id (prefetch path, [Entity Graph](/reference/entity-graph))
+POST   /api/projects/:pid/entities                      — create entity
+GET    /api/projects/:pid/entities/:id                  — runtime view
+GET    /api/projects/:pid/entities/:id?include=editor   — editor view ([ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field))
+GET    /api/projects/:pid/entities/:id?include=refs,backlinks,editor
+                                                        — composite fetch for the
+                                                          Inspector; collapses three
+                                                          round-trips into one
+PATCH  /api/projects/:pid/entities/:id                  — update (requires If-Match, [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape))
+DELETE /api/projects/:pid/entities/:id                  — delete
+
+# Entity history
+GET    /api/projects/:pid/entities/:id/versions           — version list ([ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log))
+GET    /api/projects/:pid/entities/:id/versions/:version  — entity at version
+POST   /api/projects/:pid/entities/:id/revert             — revert to version
+
+# Refs and backlinks
+GET    /api/projects/:pid/entities/:id/refs       — outbound refs
+GET    /api/projects/:pid/entities/:id/backlinks  — inbound refs
+
+# Sync
+GET    /api/projects/:pid/snapshot                — NDJSON cold snapshot ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol))
+GET    /api/projects/:pid/events?since=<cursor>   — long-poll incremental events
+GET    /api/projects/:pid/events?stream=sse       — SSE live stream
+
+# Schema
+GET    /api/schema                                — workspace's entity-type registry ([ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation))
+
+# Assets ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage))
+POST   /api/projects/:pid/assets                  — mint upload URL
+POST   /api/projects/:pid/assets/:id/commit       — commit uploaded blob
+GET    /api/projects/:pid/assets/:id              — metadata + signed download URL
+GET    /api/projects/:pid/assets/:id/raw          — streamed bytes (engine plugin)
+
+# Save files (player-game-state; [Save System](/reference/save-system))
+GET    /api/projects/:pid/saves
+POST   /api/projects/:pid/saves
+GET    /api/projects/:pid/saves/:slotId
+DELETE /api/projects/:pid/saves/:slotId
+
+# Marketplace (Phase 4)
+GET    /api/marketplace/templates
+GET    /api/marketplace/plugins
+POST   /api/marketplace/install    — install into project
+POST   /api/marketplace/publish    — publish signed bundle ([ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing))
+
+# Engine-portable artifacts (Phase 4; [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side))
+GET    /api/artifacts/:pluginId/:version/:target
+                                   — fetch transpiled artifact (unity-csharp|unreal-cpp|godot-gdextension)
+POST   /api/transpile              — workspace-scoped on-demand transpile for unpublished dev plugins
+                                     body: { pluginId, target }; rate-limited, cached, metered
+
+# Agents (Phase 3; [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model), spec/28)
+POST   /api/workspaces/:wid/agents            — create Agent + mint credential (owner only)
+GET    /api/workspaces/:wid/agents
+GET    /api/workspaces/:wid/agents/:id
+PATCH  /api/workspaces/:wid/agents/:id
+DELETE /api/workspaces/:wid/agents/:id        — revoke
+POST   /api/workspaces/:wid/agents/:id/rotate — rotate credential
+
+# Agent runs (Phase 3)
+POST   /api/projects/:pid/agent-runs          — open run (agent credential only)
+GET    /api/projects/:pid/agent-runs?agentId=&status= — list
+GET    /api/projects/:pid/agent-runs/:id      — detail + writes + proposals
+POST   /api/projects/:pid/agent-runs/:id/close
+POST   /api/projects/:pid/agent-runs/:id/revert — revert all writes tagged with this run_id
+
+# Proposals & approvals (Phase 3; [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals))
+POST   /api/projects/:pid/entities/:id/proposals    — submit proposal (header X-Alumic-Mode: proposal)
+GET    /api/projects/:pid/proposals?state=open
+GET    /api/projects/:pid/proposals/:id             — detail + reviews
+POST   /api/projects/:pid/proposals/:id/review      — submit review decision
+POST   /api/projects/:pid/proposals/:id/commit      — accept + commit (auto when threshold met)
+DELETE /api/projects/:pid/proposals/:id             — withdraw
+
+# Comments (Phase 3; spec/27)
+POST   /api/projects/:pid/entities/:id/comments     — create comment targeting :id
+GET    /api/projects/:pid/entities/:id/comments     — threaded list
+PATCH  /api/projects/:pid/comments/:commentId       — edit (author only)
+DELETE /api/projects/:pid/comments/:commentId
+```
+
+### Headers
+
+Every request carries:
+
+- `Authorization: Bearer <token>` — session JWT or PAT.
+- `X-Alumic-Protocol: 1` — protocol major version.
+- `X-Alumic-Schema-Version: <cached>` — schema version negotiation ([ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation)).
+- `X-Alumic-Write-Id: <uuid>` — idempotency key for writes ([ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect)).
+
+Mutations additionally carry:
+
+- `If-Match: <version>` — optimistic-concurrency token ([ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)).
+
+### Error envelope
+
+```json
+{
+  "error": "conflict" | "not-found" | "forbidden" | "invalid" | "quota-exceeded" | "protocol-outdated" | "run-write-cap" | "run-budget",
+  "code": "proposal-required" | "version-conflict" | "...",   // subtype, optional
+  "message": "human-readable",
+  "details": { /* error-specific */ }
+}
+```
+
+Conflict detail shape: [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape). `code: 'proposal-required'` is returned when a write is blocked by an approval policy ([ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)) with a redirect hint.
+Forbidden detail shape: `{ reason, requiredRole, workspaceId }` per [Permissions](/reference/permissions).
+Quota-exceeded: `{ limit, current, plan }` per [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag).
+Run-write-cap / run-budget: `{ cap, current, runId }` — returned by agent-scoped safety middleware (spec/28).
+
+
+## Entity Write Path
+
+Every entity write (`POST`, `PATCH`, `DELETE`, `revert`) runs inside a single Postgres transaction:
+
+1. Verify `If-Match: <version>` against `entities.version` — 409 on mismatch ([ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)).
+2. Check `X-Alumic-Write-Id` against `entity_versions.write_id` unique constraint — duplicate → return the previous response unchanged (idempotent replay, [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect)).
+3. Parse payload against the entity type's Zod schema ([ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)); on failure, 400.
+4. Run reference extractors (declarative, [ADR-037 Plugin-defined schemas, extractors, and migrations ship as publish artifacts](/decisions/037-plugin-schema-registration)) against new `data`.
+5. Upsert `entities` row; append `entity_versions` row with the new `lsn` ([ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)).
+6. Delete/insert `entity_refs` rows to match the extractor output.
+7. Commit.
+
+Reverse-index recomputation for backlinks is a query against `entity_refs`, not a stored table — it is always consistent with the committed state of the transaction.

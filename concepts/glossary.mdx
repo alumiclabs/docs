@@ -1,0 +1,24 @@
+---
+title: "Glossary"
+description: "Entity graph vs FlowGraph vs canvas node; Actor, Agent, Proposal."
+icon: "book"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)
+</Info>
+
+## Terminology Cheatsheet
+
+Because "graph", "node", and "plugin" each mean different things in different chapters:
+
+- **Entity graph** — the project-wide network of typed entities and their references ([Entity Graph](/reference/entity-graph)). A *node* in this graph is an entity.
+- **FlowGraph** / `.graph.json` — an authored execution graph stored in a `.graph.json` file (chapters 11, 12). A *node* here is an execution step.
+- **Canvas node** — a spatial view of an entity on the infinite canvas ([Canvas and Workspace](/reference/canvas-and-workspace)). Shares the word "node" with execution graphs; context disambiguates.
+- **AlumicPlugin** — an in-app extension module registered via `definePlugin()` ([Plugin System](/reference/plugin-system)). Adds subsystems, editors, entity types, etc.
+- **Engine plugin** — the Unity/Unreal/Godot-side integration that mirrors an Alumic project into a game engine ([Engine Plugin](/platform/engine-plugin)). Entirely separate from AlumicPlugin.
+- **Actor** — the authoring identity behind a write ([Actors and Agents](/reference/actors-and-agents), [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model)). Resolves to either a User or an Agent.
+- **Agent** — a registered non-human author (LLM, automation rule, external service). First-class peer of User.
+- **AgentRun** — a scoped invocation of an Agent; the unit of audit and revert.
+- **Proposal** — a pending-write held for approval ([Project Management](/reference/project-management), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)). Agent writes become proposals by default; humans approve.
+- **Issue** — a flat work-item entity ([Project Management](/reference/project-management)) with a `kind` field (`task`, `bug`, `feature`, `decision`, `agent-run`, …).

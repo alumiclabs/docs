@@ -1,0 +1,65 @@
+---
+title: "ADR-040: Undo is a forward PATCH; `revert` is an explicit user action"
+description: "**`Cmd+Z` / `Cmd+Shift+Z` in the editor is a forward PATCH.** It replays the inverse of the last client command against the current server version, with a fresh `If-Match`."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log) adds an append-only `entity_versions` log and a `POST /api/entities/:id/revert` endpoint. Spec 24 describes a session-scoped per-entity undo stack on the client. Nowhere is it specified whether pressing `Cmd+Z` in the editor:
+
+1. Emits a PATCH with the previous `data` + the latest `version` as `If-Match`, producing a new version indistinguishable from any other edit.
+2. Calls `revert { toVersion }`, producing a new version marked as a revert.
+3. Is client-local until a "commit" UI action, so other tabs and the engine plugin never see intermediate undo states.
+
+The three options give different multi-tab, multi-client, and engine-plugin behaviors. Choosing implicitly means every implementer picks a different one.
+
+## Decision
+
+**`Cmd+Z` / `Cmd+Shift+Z` in the editor is a forward PATCH.** It replays the inverse of the last client command against the current server version, with a fresh `If-Match`. The server records it as a normal write; other clients (tabs, engine plugin) see it as an ordinary `entity.updated` event.
+
+`POST /api/entities/:id/revert { toVersion }` is reserved for **explicit, user-invoked "restore to version N"** from the version-history UI. It produces a new version whose `data` equals version N and whose `written_via` is recorded as `revert` (queryable for audit).
+
+### Client command stack
+
+The session-scoped `UndoSubsystem` (spec 24) holds `EditorCommand` records. On `Cmd+Z`:
+
+1. Pop the top command `c` for the focused entity.
+2. Compute `nextData = c.undo(currentLocalState)`.
+3. Send `PATCH /api/entities/:id` with `{ data: nextData }`, `If-Match: <currentVersion>`, `X-Alumic-Write-Id: <new-uuid>`.
+4. On success: push `c` onto the per-entity *redo* stack; update local state from the response.
+5. On `409 Conflict`: refetch the entity, pop no more commands, surface "The entity changed since your last edit — review before undoing further" in the editor's status bar. Redo stack is preserved.
+
+### What other clients see
+
+- Each undo produces one `entity.updated` event on the sync stream.
+- The engine plugin ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)) refreshes its mirror and fires `Alumic.EntityChanged` like any other write.
+- The version log ([ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)) records every undo as a forward version; history is linear and auditable.
+
+### When undos accumulate offline
+
+Under [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect), offline writes queue with `writeId` + `If-Match`. Undos queue identically. On reconnect, replay runs in order; an offline undo that conflicts surfaces via the standard [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape) conflict flow — the user picks keep-yours / discard / side-by-side, exactly as for a direct edit.
+
+### Interaction with reference extraction
+
+The server re-runs reference extraction on every write, including undos ([ADR-037 Plugin-defined schemas, extractors, and migrations ship as publish artifacts](/decisions/037-plugin-schema-registration)'s declarative extractors). Backlinks stay consistent; undoing an edit that introduced a new speaker reference removes the reverse-index row automatically.
+
+### Redo
+
+Redo pops the redo stack and replays `c.apply`. Same PATCH + `If-Match` discipline. Switching to a different entity freezes both undo and redo stacks for the previous entity but does not clear them (per spec 24 "Per-entity stacks").
+
+## Consequences
+
+**Enables:** One wire semantics for all edit paths. Other clients observing a project see undos as normal updates — no special-case sync code. The version history is linear and replay-safe.
+
+**Obligates:** The client command stack must be compatible with optimistic concurrency — `c.undo` must be pure enough to re-derive against server state. Rare cases where `c.undo` has drifted from server truth surface as 409s, not as silent data loss.
+
+**Forecloses:** A "time-traveling" undo that manipulates the version log directly. Undo is a forward action; looking like a rewind is a UX affordance, not a persistence model.
+
+## Related
+
+- Specs: 24-navigation-and-shell.md (§Undo / Redo Model), [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints)
+- Depends on: [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape), [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log), [ADR-037 Plugin-defined schemas, extractors, and migrations ship as publish artifacts](/decisions/037-plugin-schema-registration).
+- Informs: Phase-4 editor scope.

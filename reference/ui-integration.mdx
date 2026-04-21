@@ -1,0 +1,358 @@
+---
+title: "UI Integration"
+description: "SolidJS shell, Three.js canvas host, game-state bridging, debug panel."
+icon: "browser"
+---
+
+## Overview
+
+SolidJS is Alumic's UI framework from day one. Every template uses a SolidJS app shell that hosts the Three.js canvas and overlays game UI (HUD, menus, dialogue boxes, debug panels). SolidJS's fine-grained reactivity — updates propagate directly to DOM nodes without a virtual DOM diff — makes it ideal for game UI that updates frequently (health bars, damage numbers, timers).
+
+Beyond the runtime UI layer, Alumic includes a **visual-first WYSIWYG UI designer** backed by a **Yoga-based layout system**. Designers can drag, drop, and arrange UI elements in the designer, set properties in an inspector, and export production-ready SolidJS components. This closes the loop between design and implementation — the designer's output IS the runtime code, not a separate mockup that needs to be hand-translated.
+
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    Browser Window                         │
+│                                                           │
+│  ┌─────────────────────────────────────────────────────┐ │
+│  │                SolidJS Root                          │ │
+│  │                                                      │ │
+│  │  ┌────────────────────────────────┐                  │ │
+│  │  │         <Canvas>               │  ← Three.js      │ │
+│  │  │   (WebGL canvas, full-screen)  │    renders here   │ │
+│  │  │                                │                   │ │
+│  │  └────────────────────────────────┘                  │ │
+│  │                                                      │ │
+│  │  ┌─────────┐ ┌──────────┐ ┌──────────────────────┐ │ │
+│  │  │  HUD    │ │ Dialogue │ │  Menus / Inventory   │ │ │
+│  │  │ (health,│ │  Box     │ │  (SolidJS overlays)  │ │ │
+│  │  │  mana,  │ │         │ │                      │ │ │
+│  │  │  etc.)  │ │         │ │                      │ │ │
+│  │  └─────────┘ └──────────┘ └──────────────────────┘ │ │
+│  │                                                      │ │
+│  │  ┌──────────────────────────────────────────────┐   │ │
+│  │  │         Debug Panel (dev only)               │   │ │
+│  │  └──────────────────────────────────────────────┘   │ │
+│  │                                                      │ │
+│  └─────────────────────────────────────────────────────┘ │
+│                                                           │
+└──────────────────────────────────────────────────────────┘
+```
+
+
+## App Shell Pattern
+
+Every Alumic template follows the same app shell structure:
+
+### Entry Point (index.tsx)
+
+```tsx
+import { render } from 'solid-js/web';
+import { AppShell } from './AppShell';
+
+const root = document.getElementById('root');
+if (!root) throw new Error('Root element not found');
+
+render(() => <AppShell />, root);
+```
+
+### App Shell (AppShell.tsx)
+
+```tsx
+import { onMount, onCleanup, createSignal } from 'solid-js';
+import { Canvas } from '@alumic/render-three';
+import { createApp } from '@alumic/templates-core';
+import template from './template';
+import { HUD } from './ui/HUD';
+import { DialogueBox } from './ui/DialogueBox';
+import { PauseMenu } from './ui/PauseMenu';
+import { DebugPanel } from './ui/DebugPanel';
+
+export function AppShell() {
+  const [loading, setLoading] = createSignal(true);
+  const app = createApp(template);
+
+  onMount(async () => {
+    await app.boot();
+    await template.entry?.(app);
+    setLoading(false);
+  });
+
+  onCleanup(() => app.shutdown());
+
+  return (
+    <div class="alumic-app">
+      <Show when={loading()} fallback={
+        <>
+          <Canvas
+            class="game-viewport"
+            onReady={(kernel) => {
+              // Scene and camera setup
+            }}
+          >
+            <HUD />
+            <DialogueBox />
+          </Canvas>
+          <PauseMenu />
+        </>
+      }>
+        <LoadingScreen />
+      </Show>
+
+      {import.meta.env.DEV && <DebugPanel app={app} />}
+    </div>
+  );
+}
+```
+
+
+## Bridging Game State to SolidJS
+
+Game state lives in Alumic subsystems. SolidJS components need to read this state reactively. The bridge uses **channel-driven signals**: SolidJS signals are updated by subscribing to Alumic event channels.
+
+### createGameSignal Helper
+
+```typescript
+import { createSignal, onCleanup } from 'solid-js';
+import type { Channel } from '@alumic/core';
+
+/**
+ * Create a SolidJS signal that updates when an Alumic channel emits.
+ *
+ * @example
+ * function HealthBar() {
+ *   const health = createGameSignal(AttributeChanged, (e) =>
+ *     e.attribute === 'health' ? e.newValue : undefined
+ *   );
+ *   return <div class="health-bar" style={{ width: `${health()}%` }} />;
+ * }
+ */
+export function createGameSignal<T, V>(
+  channel: Channel<T>,
+  selector: (event: T) => V | undefined,
+  initial?: V,
+): () => V | undefined {
+  const [value, setValue] = createSignal<V | undefined>(initial);
+
+  const unsub = channel.on((event) => {
+    const selected = selector(event);
+    if (selected !== undefined) {
+      setValue(() => selected);
+    }
+  });
+
+  onCleanup(unsub);
+  return value;
+}
+```
+
+### createSubsystemAccessor Helper
+
+```typescript
+import { createMemo, createSignal } from 'solid-js';
+import type { SubsystemHandle, TickContext } from '@alumic/core';
+
+/**
+ * Create a SolidJS accessor that reads from a subsystem every frame.
+ * Uses a SolidJS signal updated by a scheduled system.
+ *
+ * @example
+ * function PlayerPosition() {
+ *   const pos = createSubsystemAccessor(
+ *     PlayerSubsystem,
+ *     (state) => ({ x: state.position.x, z: state.position.z }),
+ *   );
+ *   return <div>X: {pos()?.x.toFixed(1)}, Z: {pos()?.z.toFixed(1)}</div>;
+ * }
+ */
+export function createSubsystemAccessor<T, V>(
+  handle: SubsystemHandle<T>,
+  selector: (state: T) => V,
+): () => V | undefined;
+```
+
+
+## Common UI Components
+
+### HUD
+
+```tsx
+import { createGameSignal } from '@alumic/ui-bridge';
+import { AttributeChanged } from '@alumic/ability';
+
+export function HUD() {
+  const health = createGameSignal(
+    AttributeChanged,
+    (e) => e.attribute === 'health' ? e.newValue : undefined,
+    100,
+  );
+
+  const maxHealth = createGameSignal(
+    AttributeChanged,
+    (e) => e.attribute === 'maxHealth' ? e.newValue : undefined,
+    100,
+  );
+
+  const healthPercent = () => ((health() ?? 100) / (maxHealth() ?? 100)) * 100;
+
+  return (
+    <div class="hud" style={{ 'pointer-events': 'none' }}>
+      <div class="health-bar-container">
+        <div
+          class="health-bar-fill"
+          style={{ width: `${healthPercent()}%` }}
+        />
+        <span class="health-text">{health()} / {maxHealth()}</span>
+      </div>
+    </div>
+  );
+}
+```
+
+### Dialogue Box
+
+See [Dialogue System](/reference/dialogue-system) for the detailed SolidJS dialogue component.
+
+### Pause Menu
+
+```tsx
+import { createSignal, Show } from 'solid-js';
+
+export function PauseMenu() {
+  const [visible, setVisible] = createSignal(false);
+
+  // Listen for pause input
+  ActionPressed.on((e) => {
+    if (e.action === 'Pause') setVisible(v => !v);
+  });
+
+  return (
+    <Show when={visible()}>
+      <div class="pause-overlay">
+        <div class="pause-menu">
+          <h2>Paused</h2>
+          <button onClick={() => setVisible(false)}>Resume</button>
+          <button onClick={() => saveGame()}>Save Game</button>
+          <button onClick={() => openSettings()}>Settings</button>
+          <button onClick={() => quitToMenu()}>Quit to Menu</button>
+        </div>
+      </div>
+    </Show>
+  );
+}
+```
+
+
+## CSS Strategy
+
+Game UI uses standard CSS. Conventions:
+
+```css
+/* Reset for game viewport */
+.alumic-app {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  position: relative;
+  font-family: system-ui, sans-serif;
+  user-select: none; /* prevent text selection during gameplay */
+}
+
+/* Canvas fills the viewport */
+.game-viewport {
+  position: absolute;
+  inset: 0;
+}
+
+/* UI overlays sit on top of canvas */
+.hud,
+.dialogue-box,
+.pause-overlay {
+  position: absolute;
+  z-index: 10;
+}
+
+/* Pointer events pass through to canvas by default */
+.hud {
+  pointer-events: none;
+  inset: 0;
+  padding: 16px;
+}
+
+/* Interactive elements re-enable pointer events */
+.hud button,
+.dialogue-box,
+.pause-overlay {
+  pointer-events: auto;
+}
+```
+
+
+## Debug Panel (Development Only)
+
+The debug panel is a SolidJS component shown only in development builds. It provides:
+
+### System Monitor
+- FPS counter and frame time graph
+- Per-system timing breakdown (from scheduler profiling)
+- Memory usage
+
+### State Inspector
+- Active plugins list
+- Active subsystems with their scope
+- Current scene stack
+- Active players
+
+### Event Log
+- Real-time log of events emitted on channels
+- Filterable by tag prefix
+- Clickable events to inspect payload
+
+### Tag Browser
+- All registered tags in a tree view
+- Which channels are subscribed to each tag
+- Tag redirectors
+
+### Input Debugger
+- Active input context
+- Current button/axis states
+- Raw device inputs
+- Binding configuration
+
+```tsx
+export function DebugPanel(props: { app: App }) {
+  const [tab, setTab] = createSignal<'systems' | 'state' | 'events' | 'input'>('systems');
+  const [collapsed, setCollapsed] = createSignal(false);
+
+  return (
+    <div class="debug-panel" classList={{ collapsed: collapsed() }}>
+      <div class="debug-header">
+        <button onClick={() => setCollapsed(c => !c)}>
+          {collapsed() ? '>' : '<'} Debug
+        </button>
+        <Show when={!collapsed()}>
+          <nav class="debug-tabs">
+            <button classList={{ active: tab() === 'systems' }} onClick={() => setTab('systems')}>Systems</button>
+            <button classList={{ active: tab() === 'state' }} onClick={() => setTab('state')}>State</button>
+            <button classList={{ active: tab() === 'events' }} onClick={() => setTab('events')}>Events</button>
+            <button classList={{ active: tab() === 'input' }} onClick={() => setTab('input')}>Input</button>
+          </nav>
+        </Show>
+      </div>
+      <Show when={!collapsed()}>
+        <div class="debug-content">
+          <Switch>
+            <Match when={tab() === 'systems'}><SystemsTab app={props.app} /></Match>
+            <Match when={tab() === 'state'}><StateTab app={props.app} /></Match>
+            <Match when={tab() === 'events'}><EventsTab app={props.app} /></Match>
+            <Match when={tab() === 'input'}><InputTab app={props.app} /></Match>
+          </Switch>
+        </div>
+      </Show>
+    </div>
+  );
+}
+```

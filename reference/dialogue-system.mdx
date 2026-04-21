@@ -1,0 +1,520 @@
+---
+title: "Dialogue System"
+description: "Timeline/event-driven dialogue runtime over FlowGraph."
+icon: "message"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-008 Line IDs are author-written; CLI extracts .strings.csv](/decisions/008-line-ids-authored), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)
+</Info>
+
+## Overview
+
+`@alumic/dialogue` provides a **timeline/event-driven dialogue runtime** built on top of `@alumic/flow`. It interprets `Dialogue` entities ([Entity Graph](/reference/entity-graph), `DialogueType`) — stepping through nodes, presenting text and choices, evaluating conditions, and emitting events that other systems can respond to.
+
+> **Authored content is entity data, not files.** A Dialogue is a row in the
+> entity database ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)) fetched via the entity API ([Entity API](/reference/entity-api), [Entity Graph](/reference/entity-graph)).
+> The JSON shape documented below is the wire format of a Dialogue's `data`
+> field — identical in Postgres storage, API responses, the Phase-1 in-memory
+> shim ([ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim)), and `alumic export` file dumps. File loading happens only
+> at export/import boundaries.
+
+The dialogue system does NOT own the UI — it emits events with text and choice data, and a UI layer (SolidJS components) subscribes and renders them.
+
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   Dialogue Plugin                        │
+│                                                          │
+│  ┌─────────────┐   ┌──────────────┐   ┌──────────────┐ │
+│  │  Dialogue    │   │   Flow       │   │  Variable    │ │
+│  │  Manager     │   │   Runner     │   │  Provider    │ │
+│  │             │   │             │   │             │ │
+│  │ start/stop  │   │ graph walk  │   │ conditions  │ │
+│  │ active dlgs │   │ node eval   │   │ game state  │ │
+│  │ events      │   │ port follow │   │ queries     │ │
+│  └─────────────┘   └──────────────┘   └──────────────┘ │
+│         │                                    │           │
+│         ├── DialogueStarted channel          │           │
+│         ├── LinePresented channel             │           │
+│         ├── ChoicesPresented channel          │           │
+│         ├── ChoiceMade channel               │           │
+│         └── DialogueEnded channel            │           │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌──────────────────┐
+│   SolidJS UI     │
+│   (subscribes    │
+│    to channels)  │
+└──────────────────┘
+```
+
+
+## Dialogue Graph Format
+
+A Dialogue entity's `data` field holds the graph below. `alumic export` writes the same shape as a `.graph.json` sidecar for round-trip. Dialogue node types are:
+
+```json
+{
+  "$schema": "alumic://schemas/dialogue-graph.json",
+  "id": "shopkeeper-greeting",
+  "version": 1,
+  "entryNodeId": "greet",
+  "metadata": {
+    "characters": ["shopkeeper", "player"],
+    "defaultSpeaker": "shopkeeper"
+  },
+  "nodes": [
+    {
+      "id": "greet",
+      "type": "dialogue",
+      "data": {
+        "speaker": "shopkeeper",
+        "lineId": "shop.greet.001",
+        "emotion": "happy"
+      },
+      "ports": {
+        "out": [{ "id": "p1", "targetNodeId": "ask", "targetPortId": "in" }]
+      }
+    },
+    {
+      "id": "ask",
+      "type": "choice",
+      "data": {
+        "prompt": "shop.ask.prompt"
+      },
+      "ports": {
+        "choices": [
+          {
+            "id": "buy",
+            "label": "shop.ask.buy",
+            "targetNodeId": "show-wares",
+            "targetPortId": "in"
+          },
+          {
+            "id": "sell",
+            "label": "shop.ask.sell",
+            "targetNodeId": "show-sell",
+            "targetPortId": "in"
+          },
+          {
+            "id": "leave",
+            "label": "shop.ask.leave",
+            "targetNodeId": "farewell",
+            "targetPortId": "in",
+            "condition": null
+          },
+          {
+            "id": "secret",
+            "label": "shop.ask.secret",
+            "targetNodeId": "secret-quest",
+            "targetPortId": "in",
+            "condition": { "op": "gte", "var": "player.reputation.merchant", "value": 50 }
+          }
+        ]
+      }
+    },
+    {
+      "id": "farewell",
+      "type": "dialogue",
+      "data": {
+        "speaker": "shopkeeper",
+        "lineId": "shop.farewell.001"
+      },
+      "ports": {
+        "out": [{ "id": "p2", "targetNodeId": "end", "targetPortId": "in" }]
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "data": {}
+    }
+  ]
+}
+```
+
+
+## Named Schemas
+
+`@alumic/dialogue` exports named Zod schemas used both at load time (client-side sanity checks) and by the backend on write. These are the schemas that `DialogueType` in [Entity Graph](/reference/entity-graph) references — the entity type does not use `z.any()`.
+
+```typescript
+// Exported from @alumic/dialogue
+export const DialogueNodeSchema = z.discriminatedUnion('type', [
+  DialogueNodeDataSchema,   // { type: 'dialogue', data: {...} }
+  ChoiceNodeDataSchema,     // { type: 'choice', data: {...} }
+  BarkNodeDataSchema,       // { type: 'bark', data: {...} }
+  SetVarNodeDataSchema,     // { type: 'set-var', data: {...} }
+  BranchNodeDataSchema,     // { type: 'branch', data: {...} }
+  EmitNodeDataSchema,       // { type: 'emit', data: {...} }
+  // third-party node types extend this union via registerNodeType()
+]);
+
+export const DialogueGraphSchema = z.object({
+  entryNodeId: z.string(),
+  nodes: z.array(DialogueNodeSchema),
+  metadata: z.object({
+    // characters + location are also the prefetch manifest: [Entity Graph](/reference/entity-graph)'s
+    // EntityCacheSubsystem warms these at dialogue start so the runtime
+    // avoids per-line async fetches.
+    characters: z.array(z.string()).optional(),  // entity refs
+    location: z.string().optional(),              // entity ref
+    defaultSpeaker: z.string().optional(),
+  }).optional(),
+});
+```
+
+Equivalent named schemas ship from `@alumic/flow` (`FlowGraphSchema`), `@alumic/ability` (`EffectDefSchema`, `AbilityDefSchema`), and `@alumic/ui` (`UILayoutSchema`). See [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation) for where validation runs.
+
+
+## Dialogue Node Types
+
+### dialogue — Present a Line
+
+```typescript
+interface DialogueNodeData {
+  /**
+   * Entity ID of the Character speaking this line.
+   * Resolved via the entity database to get display name, portrait, voice.
+   * The reference extractor registers this as EntityRef { role: 'speaker' }.
+   * See spec 23 (Entity Graph) for reference resolution.
+   */
+  speaker: string;  // entity ref → Character
+
+  /** Localization key into .strings.csv. */
+  lineId: string;
+
+  /** Optional emotion/expression tag for the UI. */
+  emotion?: string;
+
+  /** Optional audio clip ID for voice acting. */
+  audioClip?: string;
+
+  /** Auto-advance after this many seconds (0 = wait for player input). */
+  autoAdvance?: number;
+}
+```
+
+> **Entity integration:** The `speaker` field is not a display name — it is an entity ID
+> (e.g., `"old-hermit"`) that resolves to a Character entity via the entity database.
+> The dialogue runtime resolves the speaker through the session-scoped
+> `EntityCacheSubsystem` ([Entity Graph](/reference/entity-graph) *Prefetch and Caching*) — it must **not** await the
+> async `EntityDatabase.get` in the tick path. Speakers and other referenced entities
+> are prefetched from `metadata.characters` and `metadata.location` at dialogue start;
+> the cache then serves synchronous lookups until the dialogue ends or a server push
+> ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)) invalidates an entry. The cache returns the character's display name,
+> portrait asset ID, and voice settings. In the graph editor, the speaker field renders
+> as a clickable entity chip that navigates to the character's spec sheet. See spec 23
+> (Entity Graph) for the full entity reference system.
+
+### choice — Present Branching Options
+
+```typescript
+interface ChoiceNodeData {
+  /** Localization key for the prompt text (optional). */
+  prompt?: string;
+
+  /**
+   * Choices are defined as ports, not in data.
+   * Each choice port has:
+   * - label: localization key for the choice text
+   * - condition: optional condition that must be true for the choice to appear
+   * - targetNodeId: where this choice leads
+   */
+}
+```
+
+### bark — Non-blocking ambient dialogue
+
+```typescript
+interface BarkNodeData {
+  speaker: string;
+  lineId: string;
+  /** Duration to display (seconds). */
+  duration?: number;
+  /** Whether to block graph advancement. Default: false (non-blocking). */
+  blocking?: boolean;
+}
+```
+
+### set-var — Set a dialogue variable
+
+```typescript
+interface SetVarNodeData {
+  var: string;
+  value: string | number | boolean;
+}
+```
+
+### branch — Conditional branch
+
+```typescript
+interface BranchNodeData {
+  condition: Condition;
+  // Ports: 'true' and 'false'
+}
+```
+
+### emit — Fire a game event
+
+```typescript
+interface EmitNodeData {
+  /** Tag of the channel to emit on. */
+  tag: string;
+  /** Event payload. */
+  payload: Record<string, unknown>;
+}
+```
+
+
+## Event Channels
+
+```typescript
+// All dialogue events
+export const DialogueStarted = defineChannel<{
+  graphId: string;
+  entryNodeId: string;
+}>('Dialogue.Started');
+
+export const LinePresented = defineChannel<{
+  graphId: string;
+  nodeId: string;
+  speaker: string;
+  text: string;           // resolved from localization
+  emotion?: string;
+  audioClip?: string;
+  autoAdvance?: number;
+}>('Dialogue.Line.Presented');
+
+export const ChoicesPresented = defineChannel<{
+  graphId: string;
+  nodeId: string;
+  prompt?: string;        // resolved from localization
+  choices: Array<{
+    portId: string;
+    text: string;          // resolved from localization
+    available: boolean;    // condition evaluated
+    condition?: Condition; // the raw condition (for tooltip/debug)
+  }>;
+}>('Dialogue.Choices.Presented');
+
+export const ChoiceMade = defineChannel<{
+  graphId: string;
+  nodeId: string;
+  portId: string;
+  choiceText: string;
+  choiceIndex: number;
+}>('Dialogue.Choice.Made');
+
+export const DialogueEnded = defineChannel<{
+  graphId: string;
+  lastNodeId: string;
+}>('Dialogue.Ended');
+```
+
+
+## Dialogue Manager
+
+The `DialogueManager` subsystem manages active dialogue instances:
+
+```typescript
+export const DialogueSubsystem = defineSubsystem<DialogueManager>(
+  Scope.Session,
+  (ctx) => ({
+    init() {
+      return new DialogueManager(ctx);
+    },
+    deinit(mgr) {
+      mgr.stopAll();
+    },
+  }),
+);
+
+export class DialogueManager {
+  /** Start a dialogue graph. */
+  start(graphId: string, entryNodeId?: string): DialogueInstance;
+
+  /** Get the currently active dialogue, if any. */
+  readonly active: DialogueInstance | null;
+
+  /** Advance the active dialogue (player pressed "next"). */
+  advance(): void;
+
+  /** Make a choice in the active dialogue. */
+  choose(portId: string): void;
+
+  /** Stop the active dialogue. */
+  stop(): void;
+
+  /** Stop all dialogues. */
+  stopAll(): void;
+
+  /** Whether any dialogue is currently active. */
+  readonly isActive: boolean;
+}
+```
+
+### DialogueInstance
+
+```typescript
+export interface DialogueInstance {
+  /** The graph being executed. */
+  readonly graphId: string;
+
+  /** The underlying FlowRunner. */
+  readonly runner: FlowRunner;
+
+  /** Current node ID. */
+  readonly currentNodeId: string | null;
+
+  /** Current state: presenting a line, waiting for choice, ended. */
+  readonly state: 'line' | 'choices' | 'processing' | 'ended';
+
+  /** The current line data (if state is 'line'). */
+  readonly currentLine: LinePresented | null;
+
+  /** The current choices (if state is 'choices'). */
+  readonly currentChoices: ChoicesPresented | null;
+
+  /** Variable context for this dialogue. */
+  readonly variables: VariableContext;
+
+  /** Visit counts per node. */
+  readonly visits: ReadonlyMap<string, number>;
+}
+```
+
+
+## Localization
+
+All player-facing text uses localization keys. The dialogue runtime resolves keys via the localization service:
+
+```typescript
+// Authored data references keys:
+{ "lineId": "shop.greet.001" }
+
+// .strings.csv contains the actual text:
+// id,en,es
+// shop.greet.001,"Welcome to my shop!","¡Bienvenido a mi tienda!"
+
+// At runtime, the dialogue manager resolves:
+const text = localization.get('shop.greet.001'); // "Welcome to my shop!"
+```
+
+The resolved text is included in the `LinePresented` and `ChoicesPresented` events, so UI components don't need to know about localization.
+
+### Authoring Line IDs
+
+Authors write human-readable IDs directly in dialogue nodes (`shop.greet.001`, `forest.hermit.farewell`).
+
+**Primary path (SaaS, [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-008 Line IDs are author-written; CLI extracts .strings.csv](/decisions/008-line-ids-authored)).** Extraction runs server-side on write: when a dialogue entity is saved via the API, the backend updates the project's string table, flags new and changed lines for translation, and reports duplicate IDs / stale rows on the entity event stream. Translators work against the server table; no CLI invocation required.
+
+**Offline / on-prem path.** The CLI command `alumic extract-strings` ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)) runs the same extraction locally against a file-exported project and emits `.strings.csv` stubs. Useful for offline authoring and pre-commit hooks — it produces an authoritative result when pushed back because the server re-runs extraction on ingest.
+
+### Missing Line Fallback
+
+When a `lineId` has no entry in the active locale's `.strings.csv`:
+
+- **Development:** the text renders as `[shop.greet.001]` (bracketed ID) and an error is emitted on the `LocalizationError` channel for the debug panel.
+- **Production:** the text falls back to the default locale. If still missing, the `LocalizationError` channel fires and the text renders empty.
+
+```typescript
+export const LocalizationError = defineChannel<{
+  lineId: string;
+  locale: string;
+  reason: 'missing' | 'fallback-used';
+}>('Localization.Error');
+```
+
+
+## Condition Evaluation
+
+Choice availability is determined by conditions:
+
+```json
+{
+  "id": "secret",
+  "label": "shop.ask.secret",
+  "targetNodeId": "secret-quest",
+  "condition": { "op": "gte", "var": "player.reputation.merchant", "value": 50 }
+}
+```
+
+At runtime:
+1. The dialogue manager evaluates each choice's condition
+2. Choices with failing conditions are marked `available: false` in the event
+3. The UI decides how to handle unavailable choices (hide them, grey them out, show the condition as a tooltip)
+
+
+## UI Integration (SolidJS)
+
+The dialogue system is UI-agnostic. The SolidJS dialogue component subscribes to channels:
+
+```tsx
+import { createSignal, Show, For } from 'solid-js';
+import { LinePresented, ChoicesPresented, ChoiceMade, DialogueEnded } from '@alumic/dialogue';
+
+export function DialogueBox() {
+  const [line, setLine] = createSignal<LinePresented | null>(null);
+  const [choices, setChoices] = createSignal<ChoicesPresented | null>(null);
+
+  LinePresented.on(setLine);
+  ChoicesPresented.on((c) => { setLine(null); setChoices(c); });
+  DialogueEnded.on(() => { setLine(null); setChoices(null); });
+
+  return (
+    <Show when={line() || choices()}>
+      <div class="dialogue-box">
+        <Show when={line()}>
+          {(l) => (
+            <div class="dialogue-line" onClick={() => advance()}>
+              <span class="speaker">{l().speaker}</span>
+              <p class="text">{l().text}</p>
+            </div>
+          )}
+        </Show>
+        <Show when={choices()}>
+          {(c) => (
+            <div class="dialogue-choices">
+              <For each={c().choices.filter(ch => ch.available)}>
+                {(choice, i) => (
+                  <button onClick={() => choose(choice.portId)}>
+                    {choice.text}
+                  </button>
+                )}
+              </For>
+            </div>
+          )}
+        </Show>
+      </div>
+    </Show>
+  );
+}
+```
+
+
+## Serialization
+
+Dialogue state is saved as part of the session:
+
+```json
+{
+  "dialogue": {
+    "active": {
+      "graphId": "shopkeeper-greeting",
+      "currentNodeId": "ask",
+      "variables": { "local.hasGreeted": true },
+      "visits": { "greet": 1 }
+    },
+    "globalVisits": {
+      "shopkeeper-greeting": 3,
+      "intro-dialogue": 1
+    }
+  }
+}
+```

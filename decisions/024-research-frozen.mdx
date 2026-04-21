@@ -1,0 +1,42 @@
+---
+title: "ADR-024: Research docs frozen; SUPERSEDED headers added"
+description: "Research documents are **frozen as of 2026-04-20**."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The 6 research documents in the repo root (Opinionated Brief, Executive Summary, Graph-Authoring PDF, Graph-Driven Narrative, Graph Systems research, Game Engine Architecture research) were written before the spec. Many findings from the 2026-04-20 audits are cross-corpus deviations — the spec made a choice that differs from a research recommendation, silently.
+
+The research is not obsolete context; it is adjacent context. A contributor reading a research PDF for architectural reasoning may land on decisions the spec has since moved off (pnpm+Turborepo, xstate-as-backbone, `alumic` package.json subkey, flat-JSON save format, `@Persistent`/`@SaveState` decorators, `NumRef`, three-tier taxonomies, etc.).
+
+Two options: amend the research in place, or freeze it as a historical decision log with forward-pointers to the current spec.
+
+## Decision
+
+Research documents are **frozen as of 2026-04-20**. Each document gets a one-paragraph header added at the top:
+
+```
+## SUPERSEDED — Historical Research
+
+This document is historical. Canonical Alumic design lives in `spec/`.
+Where this document and the spec disagree, the spec wins.
+
+See the ADR index for decisions that moved since this document was written.
+```
+
+Individual research documents that had tractable-scoped recommendations now superseded (xstate as backbone, `alumic` subkey, `NumRef`, pnpm+Turborepo, etc.) also carry a short "Superseded by" footnote pointing at the relevant ADR(s).
+
+## Consequences
+
+**Enables:** Research stays intact as a decision log. Contributors reading the research know where to look for current guidance. The spec is unambiguously the source of truth.
+
+**Obligates:** Any future research exploration must be treated the same way — write it fresh, decide in an ADR, and (if it supersedes prior research) add the corresponding footnote.
+
+**Forecloses:** In-place edits to research PDFs. Research is archaeology once published; new findings go into new documents or ADRs.
+
+## Related
+
+- Findings resolved in bulk: audit-1 A1-A4, C5, D1-D3; audit-2 #06, #09, #10, #11, #12, #17.

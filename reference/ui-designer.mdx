@@ -1,0 +1,222 @@
+---
+title: "UI Designer"
+description: "Yoga-based layout, WYSIWYG authoring, vector integration."
+icon: "object-group"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-017 Shared VariableRegistry in @alumic/core](/decisions/017-shared-variable-registry)
+</Info>
+
+## Yoga-Based Layout System
+
+Alumic's UI layout engine is built on **Yoga** (Facebook's cross-platform layout engine implementing Flexbox). This provides:
+
+- **Flexbox semantics** — The industry-standard layout model, familiar to web developers
+- **Cross-platform portability** — Yoga layouts can be rendered in browser (CSS), native (React Native), or custom renderers
+- **Deterministic layout** — Same input always produces the same output, enabling visual design tools
+- **Performance** — Yoga is written in C++, compiled to WASM for browser use
+
+### Layout Definitions
+
+UI layouts are defined as typed data (like all Alumic content), not imperative code:
+
+```typescript
+export interface UILayoutDef {
+  id: string;
+  name: string;
+  root: UINodeDef;
+}
+
+export interface UINodeDef {
+  type: string;                    // 'container' | 'text' | 'image' | 'bar' | 'button' | custom
+  id?: string;                     // for targeting from game code
+  style: YogaStyle;                // flexbox layout properties
+  props?: Record<string, unknown>; // component-specific props
+  bindings?: UIBinding[];          // reactive bindings to game state
+  children?: UINodeDef[];
+}
+
+export interface YogaStyle {
+  flexDirection?: 'row' | 'column' | 'row-reverse' | 'column-reverse';
+  justifyContent?: 'flex-start' | 'center' | 'flex-end' | 'space-between' | 'space-around';
+  alignItems?: 'flex-start' | 'center' | 'flex-end' | 'stretch';
+  alignSelf?: 'auto' | 'flex-start' | 'center' | 'flex-end' | 'stretch';
+  flexGrow?: number;
+  flexShrink?: number;
+  flexBasis?: number | string;
+  width?: number | string;
+  height?: number | string;
+  minWidth?: number | string;
+  maxWidth?: number | string;
+  padding?: number | [number, number, number, number];
+  margin?: number | [number, number, number, number];
+  gap?: number;
+  position?: 'relative' | 'absolute';
+  top?: number;
+  left?: number;
+  right?: number;
+  bottom?: number;
+}
+
+export interface UIBinding {
+  /** Property to bind (e.g., 'text', 'fillPercent', 'visible'). */
+  property: string;
+  /** Source expression (e.g., 'player.health', 'player.health / player.maxHealth'). */
+  source: string;
+  /** Optional transform (e.g., format as "85/100"). */
+  format?: string;
+}
+```
+
+### Layout File Format (.ui.json)
+
+```json
+{
+  "$schema": "alumic://schemas/ui-layout.json",
+  "id": "main-hud",
+  "name": "Main HUD",
+  "root": {
+    "type": "container",
+    "style": { "flexDirection": "column", "padding": 16, "position": "absolute", "top": 0, "left": 0, "right": 0 },
+    "children": [
+      {
+        "type": "container",
+        "style": { "flexDirection": "row", "gap": 8, "alignItems": "center" },
+        "children": [
+          {
+            "type": "bar",
+            "id": "health-bar",
+            "style": { "width": 200, "height": 20 },
+            "props": { "color": "#e74c3c", "backgroundColor": "#2c3e50" },
+            "bindings": [
+              { "property": "fillPercent", "source": "player.health / player.maxHealth" },
+              { "property": "label", "source": "player.health", "format": "{value} HP" }
+            ]
+          },
+          {
+            "type": "bar",
+            "id": "mana-bar",
+            "style": { "width": 150, "height": 16 },
+            "props": { "color": "#3498db", "backgroundColor": "#2c3e50" },
+            "bindings": [
+              { "property": "fillPercent", "source": "player.mana / player.maxMana" }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Binding Expressions
+
+UI binding `source` expressions (e.g., `"player.health / player.maxHealth"`) resolve through the **shared VariableRegistry** (`ctx.variables`, [State Machines](/reference/state-machines), [ADR-017 Shared VariableRegistry in @alumic/core](/decisions/017-shared-variable-registry)). This is the same registry flow conditions and dialogue variable reads use — one source of truth for path-to-value resolution across UI, flow, and dialogue.
+
+The expression grammar is the same declarative condition format from [Data Formats](/reference/data-formats) (no `eval`, no code strings). Operators: `+`, `-`, `*`, `/`, comparisons, logical `and`/`or`, ternary. Missing paths evaluate to `undefined`; the binding renders the property's default.
+
+### Runtime Rendering
+
+The layout runtime takes a `.ui.json` definition and renders it as a SolidJS component tree:
+
+```typescript
+import { renderUILayout } from '@alumic/ui';
+
+// In a template's App.tsx:
+<Canvas>
+  <UILayer layout="main-hud" />
+</Canvas>
+```
+
+The `UILayer` component:
+1. Loads the `.ui.json` layout definition
+2. Runs Yoga to compute layout positions and sizes
+3. Renders SolidJS components for each node
+4. Binds reactive properties to game state via the binding expressions
+5. Re-layouts on window resize
+
+
+## WYSIWYG UI Designer (Phase 4)
+
+The UI Designer is a dedicated application mode for visually authoring `.ui.json` layouts. It is a visual-first tool — designers work by dragging, dropping, and configuring elements, not by writing code.
+
+### Designer Features
+
+- **Component palette** — Drag UI primitives (container, text, image, bar, button) onto the design canvas
+- **Visual layout** — Arrange elements with visual guides showing flex direction, alignment, and spacing
+- **Property inspector** — Edit Yoga style properties, component props, and data bindings via form controls
+- **Live preview** — See the layout rendered in real-time, with mock game data driving bindings
+- **Responsive preview** — Toggle between common viewport sizes (phone, tablet, desktop, ultrawide)
+- **Component templates** — Save reusable UI patterns (health bar, minimap, dialogue box) as templates
+- **Export** — Saves directly to `.ui.json` — no code generation step, no format translation
+
+### UI Template Ecosystem
+
+A library of pre-built UI templates that ship with Alumic or are community-contributed:
+
+| Template | Contents |
+|----------|---------|
+| `ui-hud-minimal` | Health bar, minimap indicator, hotbar |
+| `ui-hud-rpg` | Health/mana/stamina bars, XP bar, level indicator, buff icons |
+| `ui-inventory-grid` | Grid-based inventory with drag-drop slots |
+| `ui-dialogue-standard` | Speaker portrait, text box, choice buttons |
+| `ui-menu-main` | Title, play/settings/quit buttons, background |
+| `ui-settings` | Audio/video/input settings with sliders and dropdowns |
+| `ui-toast` | Notification/achievement toast popup |
+
+Templates are `.ui.json` files with well-documented binding points. Game developers customize them by changing styles, swapping assets, and adjusting bindings — no SolidJS knowledge required for basic customization.
+
+
+## Vector Editor Integration
+
+The vector editor (see [Canvas and Workspace](/reference/canvas-and-workspace)) is a standalone creative tool that integrates with the UI designer:
+
+- Icons designed in the vector editor can be referenced directly in `.ui.json` layouts
+- SVG exports are optimized and inlined at build time
+- The designer's image picker shows vector editor assets alongside raster assets
+- Changes to vector assets live-update in the UI designer's preview
+
+
+## Future: Editor Shell (Phase 4)
+
+The editor will be a full SolidJS application built with `@alumic/editor-core`, providing multiple modes (see [Canvas and Workspace](/reference/canvas-and-workspace) for the full mode taxonomy). Key panels:
+
+- **Scene tree** — Hierarchical view of scene entities
+- **Inspector** — Property editor for selected entities
+- **Graph editor** — Visual node-graph editor for dialogue/quest/flow graphs
+- **UI designer** — WYSIWYG layout authoring (described above)
+- **Asset browser** — Browse and preview game assets
+- **Tag browser** — Manage the tag registry
+- **Timeline** — Cinematic/animation timeline editor
+- **Infinite canvas** — Spatial workspace with level portals
+
+```tsx
+// @alumic/editor-core
+export function AlumicApp(props: { template: TemplateDefinition }) {
+  const [mode, setMode] = createSignal<AppMode>('viewport');
+
+  return (
+    <div class="alumic-editor">
+      <ModeSwitcher mode={mode()} onSwitch={setMode} />
+      <Switch>
+        <Match when={mode() === 'viewport'}>
+          <GameViewport template={props.template} />
+        </Match>
+        <Match when={mode() === 'canvas'}>
+          <InfiniteCanvas />
+        </Match>
+        <Match when={mode() === 'ui-designer'}>
+          <UIDesigner />
+        </Match>
+        <Match when={mode() === 'graph-editor'}>
+          <GraphEditor />
+        </Match>
+        <Match when={mode() === 'vector-editor'}>
+          <VectorEditor />
+        </Match>
+      </Switch>
+    </div>
+  );
+}
+```

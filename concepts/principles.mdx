@@ -1,0 +1,79 @@
+---
+title: "Design Principles"
+description: "Plugin-first, data-driven, engine-portable, explicit-over-magic."
+icon: "lightbulb"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed)
+</Info>
+
+## Design Principles
+
+### 1. Plugin-First Architecture
+
+Every feature is a plugin. The core kernel provides only the composition machinery — plugin registry, subsystem lifecycle, event bus, scheduler, tag registry. Everything else (rendering, input, dialogue, combat) is a plugin that registers itself during `App.boot()`.
+
+Plugins declare their dependencies explicitly. The kernel topologically sorts them and calls `build()` in dependency order. No implicit ordering, no load-order bugs.
+
+### 2. Data-Driven Content
+
+Game content is authored as inert data validated by Zod schemas. Under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)), the primary store is the backend entity database ([Entity Graph](/reference/entity-graph)); the file formats below are the **export / import / on-prem seed** shape. The framework enforces a three-layer separation:
+
+| Layer | Server-side | Export format | Mutability | Example |
+|---|---|---|---|---|
+| **Authored Content** | `entities.data` field (JSONB) | `.entity.json`, `.graph.json`, `.def.json`, `.strings.csv` | Frozen at runtime | Dialogue trees, item definitions, skill graphs |
+| **Editor Metadata** | `entities.editor_metadata` field ([ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field)) | `.layout.json` sidecar | Never served to runtime clients | Node positions, viewport state, comments |
+| **Runtime State** | Not in entity DB | `.save.json` via save system ([Save System](/reference/save-system)) | Mutable, serializable | Current dialogue node, inventory contents, variable values |
+
+This separation prevents the "pollution" problem where runtime mutations leak into authored data or editor state bloats the runtime bundle. The split between `data` and `editor_metadata` is enforced by API contract ([ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field)), not by file structure.
+
+### 3. Engine-Portable Systems
+
+Alumic systems are valuable not because they run in the browser, but because they produce **engine-portable game logic**. The browser is where template authors iterate fast. Three.js is today's substrate. But the authored content (entities + their data) and the component schemas declared via `@alumic/ecs` are designed to be transpilable to C#, Rust, or C++ for deployment in Unity, Unreal, or Godot.
+
+Portability applies to components authored with `@alumic/ecs` and `FieldType` schemas; plain-TypeScript systems outside `@alumic/ecs` are not guaranteed portable. The transpile **runs server-side on plugin publish** ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side)) and is delivered to the engine plugin ([Engine Plugin](/platform/engine-plugin), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)) as a versioned artifact — it is never generated on a user's machine.
+
+This portability is achieved by:
+- Using plain-data component schemas with `FieldType` mappings to native types (see [Data Formats](/reference/data-formats) and [ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed) for the concrete `FieldType` enum)
+- Avoiding reflection, decorators, and runtime metaprogramming
+- Using explicit `define*` factories that produce static descriptors
+- Keeping all content as typed entity data — no engine-specific asset formats
+
+### 4. Explicit Over Magic
+
+No decorators. No reflection. No code generation. No dependency injection containers.
+
+Everything uses explicit factory functions:
+
+```typescript
+definePlugin(...)
+defineSubsystem(...)
+defineChannel(...)
+defineSystem(...)
+defineTag(...)
+defineTemplate(...)
+```
+
+TypeScript generics capture schema shapes at the call site. The result is code that is:
+- Fully tree-shakable (no side effects from decorators)
+- Trivially transpilable (no TS-specific features beyond generics)
+- Debuggable (no hidden registration magic)
+- Compatible with all `tsconfig` strictness levels
+
+### 5. Composition Over Inheritance
+
+Templates compose plugins. Plugins compose subsystems and systems. Subsystems compose via the event bus and `ctx.get()` references. There are no deep class hierarchies. The `AlumicPlugin` interface has one method: `build(ctx)`. The `SubsystemConfig<T>` has three: `init`, `deinit`, `tick`.
+
+The difference between a top-down action game and a tactics game is the **template manifest** — which plugins are listed, which subsystems are registered, which scenes are declared — not a different class hierarchy.
+
+### 6. Minimal Kernel, Maximum Surface
+
+The kernel is intentionally small (~300 lines of TypeScript). It provides:
+1. Plugin Registry — late-binding, dependency-sorted
+2. Subsystem Hierarchy — four scopes with automatic lifecycle
+3. Typed Event Bus — `Observable<T>` channels addressed by hierarchical tags
+4. Tag Registry — dotted hierarchical tags with redirectors
+5. Three-Phase Scheduler — PreUpdate → Update → PostUpdate
+
+Everything else is built on top of these five primitives by plugins. The kernel never grows; it only gets more plugins.

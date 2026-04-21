@@ -1,0 +1,68 @@
+---
+title: "ADR-038: Multiplayer auth uses short-lived room tickets, not PATs"
+description: "The entity-API backend issues **room tickets** — short-lived, single-use bearer tokens scoped to `(userId, workspaceId, projectId, roomName)`."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Spec 19 originally declared `MultiplayerConfig.authToken` accepts JWT or PAT, "the same as the entity API." Two problems:
+
+1. **PATs are authoring credentials** ([ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)) — long-lived, machine-held, designed for engine plugins, CLI, and CI. A leaked `asset:read` PAT should not be able to authenticate as a player in a live multiplayer room.
+2. **The Colyseus server is separate from the entity-API backend** (spec 19). Having it accept the same token types couples two auth surfaces and two threat models.
+
+The multiplayer runtime needs a credential that (a) proves the bearer is a real user of a specific project at the moment of room join, (b) cannot be reused outside that narrow window, and (c) does not require the Colyseus server to validate PAT hashes or resolve workspace membership on every message.
+
+## Decision
+
+The entity-API backend issues **room tickets** — short-lived, single-use bearer tokens scoped to `(userId, workspaceId, projectId, roomName)`. Only JWT sessions may mint tickets; PATs may not.
+
+### Ticket issuance
+
+```
+POST /api/projects/:pid/multiplayer/tickets
+Authorization: Bearer <jwt>
+Body: { "roomName": "arena-duel" }
+
+→ 200 OK
+{
+  "ticket": "alumt_<opaque>",
+  "serverUrl": "wss://mp.alumic.app",
+  "expiresAt": "2026-04-20T15:30:30.000Z"   // now + 30s
+}
+```
+
+The ticket is a signed (HS256) token carrying `{ userId, workspaceId, projectId, roomName, jti, exp }`. The Colyseus server shares the signing secret with the entity-API backend (it does not share the user database).
+
+### Ticket redemption
+
+The browser client passes `ticket` to `MultiplayerConfig.authToken`. On room join, the Colyseus server:
+
+1. Verifies the signature and `exp`.
+2. Checks `jti` against an in-memory dedup set (rejects reuse).
+3. Asserts `roomName` matches the room the client is trying to join.
+4. Attaches `{ userId, workspaceId, projectId }` to the Colyseus session.
+
+Room membership thereafter is stateful — the ticket is not needed for subsequent messages.
+
+### Forbidden: PAT on multiplayer
+
+PATs do not mint tickets. `POST /api/projects/:pid/multiplayer/tickets` with a PAT-bearing request returns `403 Forbidden { error: "forbidden", reason: "pat-not-eligible-for-multiplayer" }`. The multiplayer server rejects tickets that didn't originate from a JWT-bearing issuance.
+
+Engine plugins and CLI tools are authoring surfaces, not player surfaces. If a machine client genuinely needs to observe a multiplayer room (e.g., a replay bot), a separate dedicated auth flow will be added.
+
+## Consequences
+
+**Enables:** Clean auth boundary between authoring (entity API, PATs + JWTs) and runtime (multiplayer, JWT-minted tickets only). Leaked PATs cannot impersonate players. The Colyseus server stays stateless about workspace membership — it trusts the ticket.
+
+**Obligates:** The entity-API backend runs a ticket-minting endpoint with rate limits (per workspace, per user, per project). Tickets carry `jti` + server-side dedup (in-memory with ~60s retention; Redis if multiplayer scales past one instance). Signing secret rotation has a defined overlap window so in-flight tickets survive.
+
+**Forecloses:** PATs as multiplayer credentials. Long-lived multiplayer auth tokens — all tickets expire in 30 seconds.
+
+## Related
+
+- Specs: 19-networking.md (§Multiplayer Subsystem)
+- Depends on: [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth), [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag).
+- Informs: Phase-3 multiplayer scope.

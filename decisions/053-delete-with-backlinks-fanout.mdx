@@ -1,0 +1,39 @@
+---
+title: "ADR-053: Delete-with-backlinks nulls inbound refs and writes new source versions"
+description: "`DELETE /api/projects/:pid/entities/:id?force=true` runs a server-side cascade in one transaction:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Spec 23 describes a `force: true` delete that bypasses the has-backlinks guard but does not specify what happens to the entities that still point at the deleted one. Leaving dangling references is a real option (the inspector already shows broken links), but the server must decide whether ref rows, source entity `data`, and sync events are updated as a consequence.
+
+## Decision
+
+`DELETE /api/projects/:pid/entities/:id?force=true` runs a server-side cascade in one transaction:
+
+1. The target entity's row is deleted from `entities`; its `entity_refs` rows with `source_id = :id` are removed.
+2. For every inbound ref (`entity_refs` rows with `target_id = :id`), the **source entity is rewritten**:
+   - The field that held the ref is set to `null` (or removed, if the schema allows).
+   - A new row in `entity_versions` is appended for the source entity with `written_via: 'system'`.
+   - The reference extractor re-runs; `entity_refs` for the source are updated accordingly.
+3. `Entity.Deleted` fires for the target. `Entity.Updated` fires for each rewritten source — their sync cursors advance normally.
+4. `EntityRefBroken` **does not fire** for refs nulled by this cascade; the refs are gone, not broken. The channel remains for refs broken by out-of-band data corruption or partial imports.
+
+For entities whose schema requires the nulled field (not optional), the cascade **refuses** and the force-delete fails with `409 Conflict` and `{ conflicts: [...] }` naming the source entities that block the delete. The client surfaces the list and the user chooses: edit the source entities first, or leave the target in place.
+
+## Consequences
+
+**Enables:** One deterministic cascade rather than scattered "what happens on delete?" decisions per entity type. Engine-plugin mirrors receive regular `Entity.Updated` events for the rewritten sources; no special-case sync messages.
+
+**Obligates:** Every entity-type schema must declare nullability on ref fields if force-delete is intended to succeed without author intervention. Types where refs are required (e.g., a `CraftingRecipe.result` ref to an Item) reject force-delete by design — a conscious schema choice, not a bug.
+
+**Forecloses:** Silent dangling refs after a force-delete. The sources are always rewritten, or the delete fails.
+
+## Related
+
+- Specs: [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints)
+- Depends on: [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log).
+- Informs: [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol) (Entity.Updated sync events from cascades).

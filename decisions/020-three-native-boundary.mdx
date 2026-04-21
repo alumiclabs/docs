@@ -1,0 +1,36 @@
+---
+title: "ADR-020: Render kernel is Three-native permanently"
+description: "The Three-native abstraction boundary is **permanent**."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The research brief explicitly rejected an `AlumicMesh` wrapper around `THREE.Mesh` as a "double-taxation pattern." Users continue writing `new THREE.Mesh(geo, mat)`; Alumic's `RenderKernel` abstracts only the GPU context, draw loop, and resource uploads — not the scene graph.
+
+But the brief left an escape hatch: "If and only if Three's WebGPU path proves insufficient, introduce a SceneNode abstraction." That "if and only if" is a perpetual ambiguity with no defined trigger. A maintainer two years from now revisiting the decision has no criterion for "proves insufficient."
+
+## Decision
+
+The Three-native abstraction boundary is **permanent**. Alumic does not ship a `SceneNode` abstraction. Template code works directly with Three.js objects — `THREE.Scene`, `THREE.Mesh`, `THREE.Light`, `THREE.PerspectiveCamera`. The `RenderKernel` interface abstracts only:
+
+- GPU context initialization and destruction.
+- Frame lifecycle (`beginFrame`, `render`, `resize`).
+- Capability flags (WebGL vs WebGPU).
+
+Switching from WebGL to WebGPU is a kernel change (different `RenderKernel` implementation); template code using Three.js objects continues to work because Three maintains API compatibility between its WebGL and WebGPU renderers.
+
+## Consequences
+
+**Enables:** Zero-overhead integration with the Three.js ecosystem. Templates use Three-adjacent libraries (OrbitControls, EffectComposer, GLTFLoader) directly. No wrapper to maintain, no double type-check, no "which class do I instantiate" confusion.
+
+**Obligates:** If Three.js makes a breaking change, templates inherit it. Pinning Three at the monorepo root (currently peer dep with a version range) is the mitigation.
+
+**Forecloses:** Swapping in a non-Three renderer (Babylon, Pixi's 3D mode, custom WebGPU engine) without rewriting all templates. This is the intentional trade-off: Three is the substrate. Teams who want a different engine should build on a different framework.
+
+## Related
+
+- Specs: [Render Kernel](/reference/render-kernel)
+- Findings resolved: audit-1 C6.

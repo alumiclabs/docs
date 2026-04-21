@@ -1,0 +1,227 @@
+---
+title: "Entity Database"
+description: "Query API, session-scoped cache, persistence, change events."
+icon: "database"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim), [ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log), [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-009 Event bus is strictly synchronous](/decisions/009-synchronous-event-bus), [ADR-050 EntityCache miss policy: placeholder + background fetch](/decisions/050-entity-cache-miss-policy), [ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)
+</Info>
+
+## Entity Database
+
+The entity database is the central store for all entities in a project. Under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim)), every method is **async** — reads and writes cross a network to the Fastify+Postgres backend, or go through the Phase-1 in-memory shim that implements the same interface. No synchronous fast path exists; subsystems that need entity data in a tick must prefetch it into a session-scoped cache (see *Prefetch and Caching* below).
+
+Writes carry an **optimistic concurrency token** (`version`, monotonically increasing per entity) per [ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab). A write with a stale version rejects with `409 Conflict` in the shape defined by [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape); the caller re-fetches and retries or surfaces the conflict to the user. Entity history is kept per [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log).
+
+```typescript
+export interface EntityDatabase {
+  // ── CRUD ──
+
+  /** Create a new entity. Server validates data against the type's schema ([ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)). */
+  create<T>(type: string, id: string, name: string, data: T): Promise<Entity<T>>;
+
+  /** Read an entity by ID. Returns undefined if not found. */
+  get(id: string): Promise<Entity | undefined>;
+
+  /**
+   * Update an entity. `expectedVersion` is the version the caller last saw;
+   * the server rejects with ConflictError if the stored version has advanced.
+   * Server re-extracts references and rebuilds the backlink index on success.
+   */
+  update(
+    id: string,
+    patch: Partial<{ name: string; data: unknown; tags: string[] }>,
+    expectedVersion: number,
+  ): Promise<Entity>;
+
+  /** Delete an entity. Rejects with has-backlinks if other entities reference this one. */
+  delete(id: string, expectedVersion: number): Promise<DeleteResult>;
+
+  // ── Query ──
+
+  /** List entities by type, paginated. */
+  list(type: string, options?: { cursor?: string; limit?: number }): Promise<Page<Entity>>;
+
+  /** Search entities by name (fuzzy match). Server-side index. */
+  search(query: string, options?: { types?: string[]; tags?: string[]; limit?: number }): Promise<readonly Entity[]>;
+
+  /** Query entities by tag (hierarchical match). */
+  byTag(tag: string, options?: { limit?: number }): Promise<readonly Entity[]>;
+
+  // ── References ──
+
+  /** Get all outbound references from an entity. */
+  getRefs(entityId: string): Promise<readonly EntityRef[]>;
+
+  /** Get all backlinks pointing to an entity. */
+  getBacklinks(entityId: string): Promise<readonly Backlink[]>;
+
+  // ── Integrity ──
+
+  /** Scan for broken references (targets that don't exist). Server-side report. */
+  validateRefs(): Promise<readonly BrokenRef[]>;
+
+  /** Find entities with no backlinks and no canvas placement. Server-side report. */
+  findOrphans(): Promise<readonly Entity[]>;
+
+  // ── Change observation ──
+
+  /**
+   * Subscribe to entity change events. Under SaaS these stream from the
+   * server via the event protocol in [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol) (SSE or long-poll).
+   * Phase 1 shim emits from local mutations only.
+   */
+  onChange(handler: (event: EntityChangeEvent) => void): Disposable;
+}
+
+export interface Page<T> {
+  readonly items: readonly T[];
+  readonly nextCursor?: string;
+}
+
+export type DeleteResult =
+  | { deleted: true }
+  | { deleted: false; reason: 'has-backlinks'; backlinks: readonly Backlink[] }
+  | { deleted: false; reason: 'version-conflict'; currentVersion: number };
+
+export interface ConflictError extends Error {
+  readonly kind: 'version-conflict';
+  readonly entityId: string;
+  readonly expectedVersion: number;
+  readonly currentVersion: number;
+}
+
+export interface EntityChangeEvent {
+  readonly kind: 'created' | 'updated' | 'deleted';
+  readonly id: string;
+  readonly type: string;
+  readonly version: number;
+}
+```
+
+### Prefetch and Caching
+
+Subsystems in the tick loop (e.g., `DialogueManager.start`, ability resolution) must not `await` entity fetches in the hot path. The pattern is:
+
+1. At scene/dialogue start, prefetch the relevant entities (driven by `metadata.characters`, `metadata.location`, etc.) into a **session-scoped `EntityCacheSubsystem`**.
+2. Hot-path reads go through the cache, which is synchronous.
+3. On `EntityChangeEvent` (server push), the cache invalidates the affected entry and re-fetches.
+
+This keeps the kernel synchronous ([ADR-009 Event bus is strictly synchronous](/decisions/009-synchronous-event-bus)) while allowing the data layer to be remote.
+
+```typescript
+export interface EntityCache {
+  /** Bulk-fetch entities into the cache. Resolves when all are loaded. */
+  prefetch(ids: readonly string[]): Promise<void>;
+
+  /**
+   * Synchronous read. Hot-path callers (dialogue, ability resolution) use this.
+   *
+   * Miss policy ([ADR-050 EntityCache miss policy: placeholder + background fetch](/decisions/050-entity-cache-miss-policy)): if `id` is not cached, the cache returns a synthetic
+   * placeholder entity whose `data` is the entity type's `defaults` and whose
+   * `version` is 0, emits `EntityCacheMiss`, and kicks off a background fetch.
+   * When the real entity arrives the cache swaps the entry and emits
+   * `EntityCacheFilled`; consumers that reactively redraw on entity change
+   * (UI via channel-driven signals, [UI Integration](/reference/ui-integration)) pick up the real data automatically.
+   * Returns `undefined` only if the type name is unknown.
+   */
+  get<T>(id: string): Entity<T> | undefined;
+
+  /** Whether an id is currently in the cache. */
+  has(id: string): boolean;
+
+  /** Invalidate one entry; the next prefetch or get triggers re-fetch. */
+  invalidate(id: string): void;
+
+  /** Drop everything — called on session end. */
+  clear(): void;
+}
+
+export const EntityCacheSubsystem: SubsystemHandle<EntityCache>;
+```
+
+The cache is wired to the `EntityDatabase.onChange` stream at `init()` so server pushes ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)) invalidate affected entries automatically.
+
+### Delete Protection
+
+When deleting an entity that other entities reference, the server rejects with `has-backlinks` and returns the backlink list. The UI shows: "This character is referenced by 3 dialogues and 1 quest. Delete anyway?" and, on confirmation, re-calls `delete` with a `force: true` flag (route detail in [Entity API](/reference/entity-api)).
+
+Dangling references (references to deleted entities) are highlighted in the inspector as broken links and surface via `EntityRefBroken`.
+
+
+## Persistence
+
+Under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)), entities live in **Postgres** as rows on an `entities` table with typed JSON columns:
+
+| Column | Purpose |
+|--------|---------|
+| `id` | Globally unique entity ID |
+| `project_id` | Which project owns this entity |
+| `type` | Entity type name (`Character`, `Dialogue`, etc.) |
+| `name` | User-facing display name |
+| `data` | Runtime-relevant content (validated against the type's Zod schema — [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)) |
+| `editor_metadata` | Layout, viewport, comments (omitted by runtime API — [ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field)) |
+| `tags` | Array of hierarchical tag strings |
+| `created_at`, `updated_at`, `version` | Bookkeeping + optimistic concurrency |
+
+Outbound references are stored in a separate `entity_refs` table keyed by `(source_id, role, target_id)`, extracted server-side on every write by the reference-extractor registry. Backlinks are computed from this table via reverse lookup.
+
+In Phase 1 ([ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim)), the same interface is served by an in-memory implementation that IndexedDB-persists between sessions — no backend yet, but the interface is the same.
+
+### File Export Format (`.entity.json`)
+
+`alumic export` emits each entity as a `.entity.json` file for on-prem seeding, git workflows, and inter-project exchange. This is also the format used for first-party template bundles ([Template System](/reference/template-system)). File-based persistence is a **second-class** path — it is the round-trip format, not the source of truth.
+
+Entities are stored as individual JSON files in the project's `data/entities/` directory, grouped by type:
+
+```
+data/
+└── entities/
+    ├── characters/
+    │   ├── old-hermit.entity.json
+    │   └── knight-captain.entity.json
+    ├── locations/
+    │   ├── forest-clearing.entity.json
+    │   └── ancient-ruins.entity.json
+    ├── lore/
+    │   └── founding-of-the-forest.entity.json
+    ├── dialogues/
+    │   └── intro-dialogue.entity.json
+    ├── quests/
+    │   └── hermit-quest.entity.json
+    └── scenes/
+        └── forest-zone.entity.json
+```
+
+### .entity.json Format
+
+```json
+{
+  "$schema": "alumic://schemas/entity.json",
+  "$type": "Character",
+  "id": "old-hermit",
+  "name": "Old Hermit",
+  "tags": ["NPC.Quest", "Region.Forest"],
+  "data": {
+    "displayName": "The Old Hermit",
+    "portrait": "018f3c2a-1b7e-4c0d-9a5f-hermit-portrait",
+    "role": "npc",
+    "bio": "A reclusive sage living deep in the forest. He knows the ancient history that others have forgotten.",
+    "attributes": {
+      "wisdom": 18,
+      "strength": 6
+    }
+  },
+  "version": 7,
+  "createdAt": "2026-04-20T12:00:00.000Z",
+  "updatedAt": "2026-04-20T15:30:00.000Z"
+}
+```
+
+> **Asset references are IDs, not paths.** The `portrait` field above is the ID
+> of an `Asset` entity ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)); clients resolve it via `ctx.assets.load(id)`.
+> File-exported projects carry asset bytes under `public/assets/<sha256>` with
+> a manifest mapping asset IDs to sha256 — see [Asset Management](/reference/asset-management) and [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage).
+
+References are NOT stored in the entity file. They are extracted from the `data` field by the reference extractors and indexed at load time. This avoids dual-source-of-truth problems — the dialogue graph's nodes contain `speaker: "old-hermit"`, and the reference extractor picks that up. There's no separate `refs` field in the JSON that could get out of sync.

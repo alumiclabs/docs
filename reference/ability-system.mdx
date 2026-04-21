@@ -1,0 +1,414 @@
+---
+title: "Ability System"
+description: "Definition → Spec → Active three-level pipeline; tag gating."
+icon: "wand-magic-sparkles"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim), [ADR-016 Constant entity type replaces NumRef](/decisions/016-constant-entity), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)
+</Info>
+
+## Overview
+
+`@alumic/ability` implements a **Gameplay Ability System (GAS)** inspired by Unreal Engine's GAS but adapted for TypeScript. It provides a structured framework for defining attributes (health, mana, stamina), effects (damage, buffs, debuffs), and abilities (spells, skills, attacks) with tag-gated activation.
+
+
+## Core Concepts
+
+### Three-Level Pipeline
+
+Effects and abilities flow through a three-level pipeline that separates definition from instantiation from execution:
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  Definition  │ ──→ │    Spec      │ ──→ │   Active     │
+│  (authored)  │     │ (configured) │     │  (running)   │
+│              │     │              │     │              │
+│ .def.json    │     │ + source     │     │ + timers     │
+│ immutable    │     │ + target     │     │ + stacks     │
+│ data-driven  │     │ + overrides  │     │ + modifiers  │
+└──────────────┘     └──────────────┘     └──────────────┘
+```
+
+1. **Definition** — Authored data in `.def.json`. Immutable. Describes what an ability/effect IS (damage type, base values, tags, cooldown).
+2. **Spec** — A configured instance bound to a source (caster) and target. Created when an ability is "prepared" or an effect is "applied." Contains overrides (e.g., a staff that increases fire damage by 20%).
+3. **Active** — A running instance with timers, stack counts, and active modifiers. Created when a spec is executed. Removed when it expires or is canceled.
+
+
+## Attributes
+
+Attributes are named numeric values that represent entity properties (health, mana, strength, etc.).
+
+### Defining Attributes
+
+```typescript
+import { defineAttributeSet } from '@alumic/ability';
+
+export const CoreAttributes = defineAttributeSet({
+  name: 'Core',
+  attributes: {
+    health:    { base: 100, min: 0, max: 999 },
+    maxHealth: { base: 100, min: 1, max: 999 },
+    mana:      { base: 50,  min: 0, max: 999 },
+    maxMana:   { base: 50,  min: 1, max: 999 },
+    stamina:   { base: 100, min: 0, max: 100 },
+    armor:     { base: 0,   min: 0, max: 999 },
+  },
+});
+
+export const CombatAttributes = defineAttributeSet({
+  name: 'Combat',
+  attributes: {
+    attackPower:  { base: 10, min: 0 },
+    spellPower:   { base: 10, min: 0 },
+    critChance:   { base: 0.05, min: 0, max: 1 },
+    critMulti:    { base: 1.5, min: 1 },
+    moveSpeed:    { base: 5, min: 0 },
+  },
+});
+```
+
+### Attribute Modifiers
+
+Each attribute has a final value computed from its base value plus modifiers:
+
+```
+FinalValue = (Base + FlatAdd) * (1 + PercentAdd) * PercentMultiply
+```
+
+Modifier types:
+- **FlatAdd** — `+10 health`
+- **PercentAdd** — `+20% attack power` (additive with other PercentAdd modifiers)
+- **PercentMultiply** — `x1.5 damage` (multiplicative, applied after PercentAdd)
+- **Override** — Sets the value directly, ignoring all other modifiers
+
+```typescript
+export interface AttributeModifier {
+  /** Which attribute to modify. */
+  attribute: string;
+
+  /** How to apply this modifier. */
+  type: 'flat' | 'percent-add' | 'percent-multiply' | 'override';
+
+  /** The modifier value. */
+  value: number;
+
+  /** Source identifier for debugging/stacking. */
+  source?: string;
+}
+```
+
+
+## Effects
+
+Effects are changes applied to an entity — damage, healing, buffs, debuffs, status conditions.
+
+### Effect Definition (.def.json)
+
+```json
+{
+  "$schema": "alumic://schemas/effect-def.json",
+  "type": "effect",
+  "version": 1,
+  "entries": [
+    {
+      "id": "burning",
+      "name": "effects.burning.name",
+      "tags": ["Effect.DoT.Fire", "Effect.Debuff"],
+      "duration": 5.0,
+      "period": 1.0,
+      "stacking": { "type": "duration-refresh", "maxStacks": 3 },
+      "modifiers": [],
+      "periodicEffects": [
+        { "attribute": "health", "type": "flat", "value": -10 }
+      ],
+      "applicationTags": {
+        "requiredTags": [],
+        "blockedTags": ["Status.Immune.Fire"],
+        "grantedTags": ["Status.Burning"]
+      }
+    },
+    {
+      "id": "strength-buff",
+      "name": "effects.strength_buff.name",
+      "tags": ["Effect.Buff.Stat"],
+      "duration": 30.0,
+      "stacking": { "type": "none" },
+      "modifiers": [
+        { "attribute": "attackPower", "type": "percent-add", "value": 0.25 }
+      ],
+      "applicationTags": {
+        "grantedTags": ["Status.Empowered"]
+      }
+    }
+  ]
+}
+```
+
+### Effect API
+
+```typescript
+export interface EffectDefinition {
+  id: string;
+  name: string;
+  tags: string[];
+  duration: number;           // 0 = instant, >0 = over time
+  period?: number;            // tick interval for periodic effects
+  stacking: StackingPolicy;
+  modifiers: AttributeModifier[];
+  periodicEffects?: AttributeModifier[];
+  applicationTags: {
+    requiredTags?: string[];   // target must have these
+    blockedTags?: string[];    // target must NOT have these
+    grantedTags?: string[];    // applied to target while active
+    removedTags?: string[];    // removed from target while active
+  };
+}
+
+export type StackingPolicy =
+  | { type: 'none' }                                    // doesn't stack
+  | { type: 'duration-refresh'; maxStacks?: number }    // refreshes duration
+  | { type: 'stack-count'; maxStacks: number }          // adds stacks
+  | { type: 'independent' };                            // each application is separate
+
+export interface ActiveEffect {
+  readonly defId: string;
+  readonly source: string;       // who applied this
+  readonly target: string;       // who it's on
+  readonly remainingDuration: number;
+  readonly stacks: number;
+  readonly grantedTags: readonly string[];
+
+  /** Remove this effect early. */
+  remove(): void;
+}
+```
+
+
+## Abilities
+
+Abilities are actions an entity can perform — spells, attacks, skills.
+
+### Ability Definition (.def.json)
+
+```json
+{
+  "$schema": "alumic://schemas/ability-def.json",
+  "type": "ability",
+  "version": 1,
+  "entries": [
+    {
+      "id": "fireball",
+      "name": "abilities.fireball.name",
+      "description": "abilities.fireball.desc",
+      "icon": "018f-asset-fireball-icon",
+      "tags": ["Ability.Fire.Ranged", "Ability.Spell"],
+      "cooldown": 3.0,
+      "cost": { "attribute": "mana", "amount": 25 },
+      "activationTags": {
+        "ownedTags": ["Ability.Fire.Ranged"],
+        "requiredTags": ["Status.Alive"],
+        "blockedTags": ["Status.Silenced", "Status.Stunned"],
+        "cancelTags": ["Status.Interrupted"]
+      },
+      "effects": [
+        {
+          "target": "enemy",
+          "effectId": "fire-damage-base",
+          "scaling": { "attribute": "spellPower", "coefficient": 1.5 }
+        },
+        {
+          "target": "enemy",
+          "effectId": "burning",
+          "chance": 0.3
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Ability API
+
+```typescript
+export interface AbilityDefinition {
+  id: string;
+  name: string;              // localization key
+  description?: string;      // localization key
+  icon?: string;             // Asset entity ID ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)); resolved via ctx.assets.load(id)
+  tags: string[];
+  cooldown: number;          // seconds
+  cost?: AbilityCost;
+  activationTags: ActivationTags;
+  effects: AbilityEffect[];
+}
+
+export interface AbilityCost {
+  attribute: string;          // e.g., 'mana'
+  amount: number;
+}
+
+export interface ActivationTags {
+  /** Tags granted to the owner while this ability is known. */
+  ownedTags?: string[];
+  /** Owner must have ALL of these tags to activate. */
+  requiredTags?: string[];
+  /** If owner has ANY of these tags, ability cannot activate. */
+  blockedTags?: string[];
+  /** If owner receives ANY of these tags, ability is canceled. */
+  cancelTags?: string[];
+}
+
+export interface AbilityEffect {
+  /** Who receives the effect: 'self', 'enemy', 'ally', 'area'. */
+  target: 'self' | 'enemy' | 'ally' | 'area';
+  /** Effect definition ID to apply. */
+  effectId: string;
+  /** Probability of applying (0-1). Default: 1. */
+  chance?: number;
+  /** Damage/healing scaling from an attribute. */
+  scaling?: { attribute: string; coefficient: number };
+}
+```
+
+### Tag-Gated Activation
+
+Before an ability activates, the system checks:
+
+```
+1. Does the owner have ALL requiredTags?        → if not, BLOCKED
+2. Does the owner have ANY blockedTags?          → if so, BLOCKED
+3. Is the ability on cooldown?                   → if so, BLOCKED
+4. Does the owner have enough resource (cost)?   → if not, BLOCKED
+5. All checks pass → ACTIVATE
+```
+
+After activation, if the owner receives any `cancelTags`, the ability is canceled mid-execution.
+
+Tag matching uses `matchesTag()` from `@alumic/tags` — hierarchical matching applies. Blocking `Status.Stunned` also blocks `Status.Stunned.Heavy`.
+
+
+## Ability Subsystem
+
+```typescript
+export const AbilitySubsystem = defineSubsystem<AbilityManager>(
+  Scope.Scene,
+  (ctx) => ({
+    init() {
+      return new AbilityManager(ctx);
+    },
+    tick(mgr, tick) {
+      mgr.tickCooldowns(tick.dt);
+      mgr.tickActiveEffects(tick.dt);
+    },
+    deinit(mgr) {
+      mgr.dispose();
+    },
+  }),
+);
+
+export class AbilityManager {
+  /** Grant an ability to an entity. */
+  grantAbility(entityId: string, abilityId: string): void;
+
+  /** Revoke an ability from an entity. */
+  revokeAbility(entityId: string, abilityId: string): void;
+
+  /** Check if an entity can activate an ability right now. */
+  canActivate(entityId: string, abilityId: string): ActivationResult;
+
+  /** Activate an ability. */
+  activate(entityId: string, abilityId: string, target?: string): void;
+
+  /** Apply an effect to an entity. */
+  applyEffect(sourceId: string, targetId: string, effectId: string): ActiveEffect;
+
+  /** Get all active effects on an entity. */
+  getActiveEffects(entityId: string): readonly ActiveEffect[];
+
+  /** Get an entity's attribute value (with all modifiers applied). */
+  getAttribute(entityId: string, attribute: string): number;
+
+  /** Get an entity's current tags (owned + granted by effects). */
+  getTags(entityId: string): readonly string[];
+}
+
+export type ActivationResult =
+  | { canActivate: true }
+  | { canActivate: false; reason: 'missing-required-tag' | 'blocked-by-tag' | 'on-cooldown' | 'insufficient-resource' | 'ability-not-granted'; detail: string };
+```
+
+
+## Prefetch Discipline
+
+`AbilityManager`'s public surface (`grantAbility`, `canActivate`, `activate`, `applyEffect`, `getAttribute`, `getTags`) is **synchronous** — it does not `await`. Under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim)) ability and effect entity definitions live behind the async `EntityDatabase` ([Entity Graph](/reference/entity-graph), `23-entity-graph.md:470-529`), so the manager only works if the relevant Ability/Effect/Constant entities are already in the **session-scoped `EntityCacheSubsystem`** (`23-entity-graph.md:557-590`).
+
+The owning plugin/template is responsible for prefetching:
+
+- On scene entry, prefetch all Ability and Effect entities the scene's spawned entities can grant or apply.
+- On `grantAbility`, the caller must have already prefetched the ability and the effects it references.
+- On `applyEffect`, prefetch the effect itself and any Constant entities its modifiers reference ([ADR-016 Constant entity type replaces NumRef](/decisions/016-constant-entity)).
+
+The cache wires to `EntityDatabase.onChange` so server pushes ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)) invalidate stale entries automatically; the manager's next read picks up the new version.
+
+A cache miss inside `activate`/`applyEffect` is a programming error, not a fallback case — the manager throws `AbilityError: definition '<id>' not in EntityCache. Prefetch before grant/activate.` rather than block the tick on a network round-trip.
+
+
+## Tuning Numeric Values
+
+Numeric fields on `EffectDef` and `AbilityDef` (damage, duration, cooldown, cost amount) are authored directly as numbers in the `.def.json` / entity data. Alumic **does not** provide a `NumRef` (`number | { __ref: string }`) indirection type.
+
+Designers who want to centralize tunable values — shared damage multipliers, global cooldown modifiers, economy constants — reference a **Constant entity** (see [Entity Graph](/reference/entity-graph)). The numeric field becomes an `EntityRef` with a scalar role (e.g., `role: 'damageFrom'`, `targetType: 'Constant'`); the ability/effect runtime resolves the ref at cast-time by reading the target Constant's `value`. This keeps indirection uniform with the rest of the entity graph and enables live rebalancing by editing one Constant entity. See [ADR-016 Constant entity type replaces NumRef](/decisions/016-constant-entity).
+
+
+## Lifecycle Across Scene Transitions
+
+When a scene is **suspended** (another scene pushed on top — [Subsystem Hierarchy](/reference/subsystem-hierarchy)), the `AbilityManager`'s `tick()` is paused. Active effects stop ticking (their `remainingDuration` freezes), cooldowns stop advancing, and periodic damage ticks don't fire while the suspended scene is under another. When the scene **resumes**, ticking continues from the captured state as if no time had passed.
+
+A save taken while a scene is suspended captures effects at their paused state — `remainingDuration` reflects the value when the scene was most recently suspended. Reloading puts the player back in the suspended scene with all effects in the same paused configuration.
+
+When a scene is **fully deinitialized** (`popScene`, `replaceScene`, `endSession`), effects in that scene are removed — their `remove()` runs, emitting `EffectRemoved` with `reason: 'scene-ended'`. They do not persist across scenes.
+
+
+## Event Channels
+
+```typescript
+export const AbilityActivated = defineChannel<{
+  entityId: string;
+  abilityId: string;
+  targetId?: string;
+}>('Ability.Activated');
+
+export const AbilityBlocked = defineChannel<{
+  entityId: string;
+  abilityId: string;
+  reason: string;
+}>('Ability.Blocked');
+
+export const AbilityCanceled = defineChannel<{
+  entityId: string;
+  abilityId: string;
+  cancelTag: string;
+}>('Ability.Canceled');
+
+export const EffectApplied = defineChannel<{
+  sourceId: string;
+  targetId: string;
+  effectId: string;
+  stacks: number;
+}>('Effect.Applied');
+
+export const EffectRemoved = defineChannel<{
+  targetId: string;
+  effectId: string;
+  reason: 'expired' | 'removed' | 'canceled';
+}>('Effect.Removed');
+
+export const AttributeChanged = defineChannel<{
+  entityId: string;
+  attribute: string;
+  oldValue: number;
+  newValue: number;
+  source: string;
+}>('Attribute.Changed');
+```

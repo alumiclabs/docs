@@ -1,0 +1,269 @@
+---
+title: "Entity Graph"
+description: "The connective tissue: typed entities, references, backlinks."
+icon: "share-nodes"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)
+</Info>
+
+## Overview
+
+The entity graph is the **connective tissue** of Alumic. Every game design artifact — a character, a location, a dialogue tree, a lore document, a quest chain, an item, a UI layout, a scene — is an **entity**. Entities have typed schemas, hold properties, and reference other entities. These references form a navigable graph that unifies all of Alumic's creative tools.
+
+This is what makes Alumic an Articy:Draft killer. In Articy, characters, locations, dialogues, and flows are separate database tables linked by foreign keys. In Alumic, they are nodes in a typed graph where references are first-class, bidirectional, and navigable from any tool surface — the 3D viewport, the graph editor, the infinite canvas, the inspector.
+
+
+## Core Principle
+
+> **A dialogue node's speaker is not a string. It is a reference to a Character entity.**
+
+This principle applies everywhere:
+- A dialogue node's `speaker` → reference to a Character entity
+- A quest objective's `location` → reference to a Location entity
+- A character's `backstory` → reference to a Lore entity
+- A scene's `npcs` → references to Character entities
+- A lore entry's `relatedLocations` → references to Location entities
+- An item's `requiredQuest` → reference to a Quest entity
+- A UI layout's `targetScene` → reference to a Scene entity
+- A canvas node → a spatial view of any entity
+
+When references are typed links instead of strings, the system can compute **backlinks** (given a Character, find all dialogues where they speak), enable **navigation** (click a speaker name to open their character sheet), and enforce **integrity** (warn when deleting a character that's referenced by 12 dialogues).
+
+
+## Entity Instances
+
+An entity instance is a concrete occurrence of an entity type with an ID, data, and references.
+
+```typescript
+export interface Entity<T = unknown> {
+  /**
+   * Entity ID. Unique within a project. May be a UUID or an author-written
+   * slug (e.g., 'old-hermit'). Project identity is separately a server-issued
+   * UUID per [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid); entity IDs are scoped under `(project_id, id)`.
+   */
+  readonly id: string;
+
+  /** The entity type name (e.g., 'Character', 'Dialogue'). */
+  readonly type: string;
+
+  /** User-facing display name. */
+  readonly name: string;
+
+  /** Type-specific data (validated against the entity type's Zod schema). */
+  readonly data: T;
+
+  /** Tags from the hierarchical tag system. */
+  readonly tags: readonly string[];
+
+  /** Outbound references to other entities. */
+  readonly refs: readonly EntityRef[];
+
+  /**
+   * Monotonic per-entity version. Sent as `If-Match: <version>` on writes;
+   * the server 409s stale writes per [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape). Always present on responses.
+   */
+  readonly version: number;
+
+  /** Creation timestamp. */
+  readonly createdAt: string;
+
+  /** Last modified timestamp. */
+  readonly updatedAt: string;
+}
+```
+
+
+## Entity References
+
+References are typed, directional links between entities. They carry a **role** that describes the nature of the relationship.
+
+```typescript
+export interface EntityRef {
+  /** The role this reference plays (e.g., 'speaker', 'location', 'relatedLore'). */
+  readonly role: string;
+
+  /** The ID of the referenced entity. */
+  readonly targetId: string;
+
+  /** The type of the referenced entity (for validation / display). */
+  readonly targetType: string;
+
+  /**
+   * Optional context — where in the source entity this reference occurs.
+   * For a dialogue, this might be the node ID where the speaker is referenced.
+   */
+  readonly context?: string;
+}
+```
+
+### Reference Roles
+
+Roles are conventionally named and consistent across entity types:
+
+| Source Type | Role | Target Type | Meaning |
+|-------------|------|-------------|---------|
+| Dialogue | `speaker` | Character | Who speaks this line |
+| Dialogue | `location` | Location | Where this dialogue takes place |
+| Dialogue | `mentions` | Lore | Lore referenced in dialogue text |
+| Dialogue | `triggeredBy` | Quest | Quest that triggers this dialogue |
+| Quest | `questGiver` | Character | NPC who gives this quest |
+| Quest | `targetLocation` | Location | Where to go for this quest |
+| Quest | `rewardItem` | Item | Items rewarded on completion |
+| Quest | `requiredDialogue` | Dialogue | Dialogue that must be completed first |
+| Character | `backstory` | Lore | Lore entries about this character |
+| Character | `homeLocation` | Location | Where this character is found |
+| Character | `abilities` | Ability | Abilities this character has |
+| Location | `scene` | Scene | The 3D scene for this location |
+| Location | `relatedLore` | Lore | Lore about this place |
+| Location | `npcs` | Character | Characters found here |
+| Lore | `relatedLocations` | Location | Places mentioned in this lore |
+| Lore | `relatedCharacters` | Character | People mentioned in this lore |
+| UILayout | `targetScene` | Scene | Scene this HUD is designed for |
+| CanvasBoard | `portalTarget` | Scene | Scene a portal node opens |
+| CraftingRecipe | `ingredient` | Item | Required input item |
+| CraftingRecipe | `result` | Item | Output item |
+
+### Reference Extraction
+
+References are extracted from entity data in two ways:
+
+1. **Explicit refs** — The entity data contains fields that are known to be entity references (e.g., `speaker`, `location`). These are declared in the entity type's reference schema.
+
+2. **Embedded refs** — References embedded within nested structures (e.g., a dialogue graph's nodes each have a `speaker` field). These are extracted by walking the entity data according to type-specific rules.
+
+```typescript
+export interface RefExtractor<T = unknown> {
+  /** The entity type this extractor handles. */
+  readonly entityType: string;
+
+  /**
+   * Extract all outbound references from an entity's data.
+   * Called when the entity is saved or updated.
+   */
+  extract(data: T): EntityRef[];
+}
+```
+
+Built-in extractors handle dialogue graphs (walk nodes, extract speaker/mention refs), quest graphs (extract quest-giver/location/reward refs), Scene content (walk `content.nodes`, enumerate `assetRefs` declared on each node — see §Scene Node Schema below), and spec sheets (extract explicit reference fields). Plugins can register custom extractors for their entity types. The engine-plugin mirror's asset GC (spec 25) depends on Scene's extractor — if it is unavailable, GC refuses to prune.
+
+
+## Backlinks
+
+Backlinks are the inverse of references — given an entity, what other entities reference it? Backlinks are **computed, not stored**. The entity database maintains a reverse index that is rebuilt when entities are modified.
+
+```typescript
+export interface Backlink {
+  /** The entity that holds the reference. */
+  readonly sourceId: string;
+  readonly sourceType: string;
+  readonly sourceName: string;
+
+  /** The role of the reference. */
+  readonly role: string;
+
+  /** Context within the source (e.g., which dialogue node). */
+  readonly context?: string;
+}
+
+// On the EntityDatabase:
+export interface EntityDatabase {
+  /** Get all backlinks pointing to an entity. */
+  getBacklinks(entityId: string): readonly Backlink[];
+
+  /** Get backlinks filtered by source type. */
+  getBacklinksByType(entityId: string, sourceType: string): readonly Backlink[];
+
+  /** Get backlinks filtered by role. */
+  getBacklinksByRole(entityId: string, role: string): readonly Backlink[];
+}
+```
+
+### Backlink Examples
+
+```typescript
+// Given: Character entity "old-hermit"
+db.getBacklinks('old-hermit');
+// Returns:
+// [
+//   { sourceId: 'intro-dialogue', sourceType: 'Dialogue', sourceName: 'Introduction',
+//     role: 'speaker', context: 'node-001' },
+//   { sourceId: 'intro-dialogue', sourceType: 'Dialogue', sourceName: 'Introduction',
+//     role: 'speaker', context: 'node-003' },
+//   { sourceId: 'hermit-quest', sourceType: 'Quest', sourceName: 'The Hermit\'s Request',
+//     role: 'questGiver' },
+//   { sourceId: 'forest-board', sourceType: 'CanvasBoard', sourceName: 'Forest Zone Planning',
+//     role: 'node' },
+//   { sourceId: 'forest-lore', sourceType: 'Lore', sourceName: 'Founding of the Forest',
+//     role: 'relatedCharacters' },
+// ]
+```
+
+This data powers the inspector's "Used by" panel — click any backlink to navigate to the source entity.
+
+
+## Integration With Existing Systems
+
+### Dialogue System (spec 12)
+
+Before: `speaker` is a plain string.
+After: `speaker` is an entity ID that resolves to a Character entity.
+
+```json
+{
+  "id": "node-001",
+  "type": "dialogue",
+  "data": {
+    "speaker": "old-hermit",
+    "lineId": "intro.001"
+  }
+}
+```
+
+The dialogue runtime resolves `"old-hermit"` via the entity database to get the Character's display name, portrait, and voice settings. The reference extractor finds `speaker` fields in all dialogue nodes and registers them as `EntityRef { role: 'speaker', targetId: 'old-hermit', targetType: 'Character' }`.
+
+### Asset Management (spec 14)
+
+Assets referenced by entities (portraits, icons, audio clips) are resolved via the asset system. Entity data contains asset paths; the asset system handles loading.
+
+### Tag Registry (spec 08)
+
+Entity tags use the hierarchical tag system. A character tagged `NPC.Quest.Forest` can be found by querying `NPC`, `NPC.Quest`, or `NPC.Quest.Forest`. The entity browser's filter uses tag queries.
+
+### Canvas (spec 22)
+
+Canvas nodes are **views of entities**. A Level Portal node on the canvas references a Scene entity. A character node references a Character entity. The canvas doesn't own these entities — it presents them spatially. Multiple canvases can reference the same entity.
+
+### Save System (spec 15)
+
+The entity database itself is a project-level artifact, not a save-game artifact. Entities (characters, dialogues, items) are authored content. Runtime state (which quests are active, inventory contents) is saved per the existing save system. Entities are **fetched lazily by scope** (scene-load prefetch, on-demand lookups) via the async `EntityDatabase` API and cached in the session-scoped `EntityCacheSubsystem` — there is no "load everything at project open" step.
+
+
+## Entity Events
+
+```typescript
+export const EntityCreated = defineChannel<{
+  id: string;
+  type: string;
+  name: string;
+}>('Entity.Created');
+
+export const EntityUpdated = defineChannel<{
+  id: string;
+  type: string;
+  changes: string[];    // which fields changed
+}>('Entity.Updated');
+
+export const EntityDeleted = defineChannel<{
+  id: string;
+  type: string;
+  name: string;
+}>('Entity.Deleted');
+
+export const EntityRefBroken = defineChannel<{
+  sourceId: string;
+  role: string;
+  targetId: string;     // the deleted/missing entity
+}>('Entity.Ref.Broken');
+```

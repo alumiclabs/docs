@@ -1,0 +1,37 @@
+---
+title: "ADR-052: Engine-plugin mirror SQLite schema is versioned; mismatch triggers rebuild"
+description: "The mirror carries a `meta` row with `mirror_schema_version: int`."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Spec 25 places the engine-plugin mirror at `.alumic/mirror.sqlite`. [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol) defines the server↔client sync protocol but says nothing about the plugin-local mirror schema. A plugin update that changes the mirror schema on a developer's machine must have a deterministic recovery path — reading a v0.4 mirror with v0.5 code is undefined.
+
+## Decision
+
+The mirror carries a `meta` row with `mirror_schema_version: int`. On plugin startup:
+
+1. Read `mirror_schema_version`.
+2. If absent or less than the current plugin's schema version, **delete the mirror** and rebuild via a cold snapshot ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)).
+3. If equal, proceed normally.
+4. If greater (plugin downgrade), refuse to start and log a diagnostic naming both versions; user must upgrade the plugin or delete `.alumic/` manually.
+
+Cold-rebuild cost is bounded: the plugin writes the snapshot NDJSON directly into the freshly-created mirror schema; typical small projects complete in seconds. Large projects (>50k entities) display a progress indicator in the plugin's engine-side panel.
+
+Asset blobs under `.alumic/assets/` are **preserved across mirror rebuilds** — they are content-addressed by SHA-256 and independent of the mirror schema. Only the mirror's entity and ref tables are rebuilt.
+
+## Consequences
+
+**Enables:** Plugin updates can change the mirror schema without migration machinery; one clean primitive (rebuild from snapshot) covers every upgrade. Asset cache warmth survives upgrades, so UX is "brief progress indicator" not "full re-download."
+
+**Obligates:** The plugin's startup path includes a cold-snapshot code path as a first-class flow, not just an exceptional one. The cold-rebuild trigger is observable via `EnginePluginSynced` (spec 25) so telemetry can track upgrade impact.
+
+**Forecloses:** In-place mirror migrations on plugin upgrade. If schema stability across plugin versions becomes desirable, revisit via a new ADR.
+
+## Related
+
+- Specs: [Engine Plugin](/platform/engine-plugin)
+- Depends on: [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect).

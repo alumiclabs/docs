@@ -1,0 +1,329 @@
+---
+title: "Template System"
+description: "defineTemplate, marketplace distribution, first-party templates."
+icon: "cubes"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-015 Canvas persistence goes through the entity database](/decisions/015-canvas-via-entity-db), [ADR-048 Template install seeds entities and rewrites refs server-side](/decisions/048-template-install-seed), [ADR-039 Templates ship seed content under data/entities/ + data/assets/](/decisions/039-template-seed-format), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware), [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth), [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)
+</Info>
+
+## Overview
+
+A **template** in Alumic is a predefined composition of plugins, subsystems, scenes, and data that forms a playable game starter. Templates are the primary unit of distribution — a game developer scaffolds a project from a template and customizes it.
+
+> Distribution is via the **Alumic marketplace** (Phase 4 deliverable — see [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4) and [Roadmap](/concepts/roadmap)). SaaS users create a new project by picking a template in the web UI; the backend clones its seed entities into the new project. On-prem / local users can still use `bunx @alumic/cli create my-game --template topdown-action`, which fetches the template bundle and produces a file-shaped project. Phase 1-3 ships only **first-party templates** (topdown-action, tactics, narrative, survival, etc.) bundled with the repo — these become the marketplace's initial entries when it launches in Phase 4.
+
+The difference between a top-down action game and a tactics game is **the template manifest** — which plugins are listed, how scenes are structured, what data is included — not a different codebase.
+
+## defineTemplate
+
+```typescript
+import type { AlumicPlugin, PluginLike, Subsystem } from '@alumic/core';
+
+export interface TemplateManifest {
+  /** Unique template identifier (kebab-case). */
+  name: string;
+
+  /** Human-readable display name. */
+  displayName: string;
+
+  /** Short description. */
+  description?: string;
+
+  /** Template version (semver). */
+  version?: string;
+
+  /**
+   * Plugins this template requires.
+   * Can be plugin objects, factory functions, or arrays (aggregate plugins).
+   */
+  plugins: PluginLike[];
+
+  /**
+   * Additional subsystems to register beyond what plugins provide.
+   * Used for template-specific game logic that isn't a reusable plugin.
+   */
+  subsystems?: SubsystemHandle<any>[];
+
+  /**
+   * Scene map: template-local scene keys → Scene entity IDs.
+   * At install time the template's seed entities are cloned into the new
+   * project with fresh IDs; the installer rewrites this map to point at the
+   * cloned Scene entity IDs. Game code calls `app.pushScene(key)` — the loader
+   * resolves the key to an entity ID and fetches via `ctx.entities.get(id)`.
+   * There is no static JSON import of scene files ([ADR-015 Canvas persistence goes through the entity database](/decisions/015-canvas-via-entity-db): Scenes are entities).
+   */
+  scenes?: Record<string, string>;
+
+  /**
+   * Template entry point. Called after App.boot() to start the game.
+   * Typically starts a session and pushes the first scene.
+   */
+  entry?: (app: App) => Promise<void>;
+
+  /**
+   * App configuration overrides.
+   */
+  appConfig?: {
+    tickRate?: number;
+    headless?: boolean;
+  };
+}
+
+/**
+ * Define a game template.
+ *
+ * @example
+ * export default defineTemplate({
+ *   name: 'topdown-action',
+ *   displayName: 'Top-Down Action',
+ *   plugins: [
+ *     threeWebGL({ antialias: true, shadowMap: true }),
+ *     input({ schema: TopDownActions }),
+ *     state(),
+ *     ability(),
+ *   ],
+ *   subsystems: [CombatSubsystem, SpawnerSubsystem],
+ *   // Keys are template-local; values are seed-entity IDs that the installer
+ *   // rewrites to the cloned-project IDs ([ADR-015 Canvas persistence goes through the entity database](/decisions/015-canvas-via-entity-db), [ADR-048 Template install seeds entities and rewrites refs server-side](/decisions/048-template-install-seed)).
+ *   scenes: {
+ *     'main': 'scene:main',
+ *     'boss': 'scene:boss',
+ *   },
+ *   entry: async (app) => {
+ *     app.startSession();
+ *     app.pushScene('main');
+ *     app.addPlayer('player-1');
+ *   },
+ * });
+ */
+export function defineTemplate(manifest: TemplateManifest): TemplateDefinition;
+```
+
+## Template as a Package
+
+Each template is a Bun workspace package:
+
+```
+templates/topdown-action/
+├── package.json
+├── tsconfig.json
+├── index.html              # SolidJS entry HTML (author-time only)
+├── vite.config.ts          # Dev server config
+├── src/                    # Author-time template code — not shipped to end users
+│   ├── index.tsx
+│   ├── App.tsx
+│   ├── template.ts         # defineTemplate() manifest
+│   ├── systems/
+│   │   ├── combat.ts
+│   │   ├── spawner.ts
+│   │   └── camera.ts
+│   └── ui/
+│       ├── HUD.tsx
+│       ├── PauseMenu.tsx
+│       └── DialogueBox.tsx
+└── data/                   # Seed content ([ADR-039 Templates ship seed content under data/entities/ + data/assets/](/decisions/039-template-seed-format)) — ingested into the backend at install
+    ├── entities/
+    │   ├── characters/*.entity.json
+    │   ├── dialogues/*.entity.json
+    │   ├── quests/*.entity.json
+    │   ├── scenes/*.entity.json
+    │   ├── items/*.entity.json
+    │   └── abilities/*.entity.json
+    ├── strings/
+    │   └── en.strings.csv
+    └── assets/             # Object-storage-bound at install ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage))
+        ├── manifest.json   # [{ id, sha256, kind, contentType, bundle }, ...]
+        └── blobs/<first-2-of-sha>/<full-sha>
+```
+
+> Binary assets ship under `data/assets/blobs/` — **not** under `public/`. The
+> publish pipeline uploads blobs to object storage; they do not become part of
+> a Vite-bundled runtime artifact ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-039 Templates ship seed content under data/entities/ + data/assets/](/decisions/039-template-seed-format)).
+
+### package.json
+
+```json
+{
+  "name": "@alumic/template-topdown-action",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bunx --bun vite",
+    "build": "bunx --bun vite build",
+    "preview": "bunx --bun vite preview"
+  },
+  "dependencies": {
+    "@alumic/core": "workspace:*",
+    "@alumic/render-three": "workspace:*",
+    "@alumic/input": "workspace:*",
+    "@alumic/state": "workspace:*",
+    "@alumic/ability": "workspace:*",
+    "@alumic/templates-core": "workspace:*",
+    "solid-js": "^1.9",
+    "three": "^0.175.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0",
+    "vite-plugin-solid": "^2.10",
+    "typescript": "^5.7"
+  }
+}
+```
+
+## Template Entry Flow
+
+```
+1. index.html loads src/index.tsx
+2. index.tsx:
+   import { render } from 'solid-js/web';
+   import { App } from './App';
+   render(() => <App />, document.getElementById('root')!);
+
+3. App.tsx:
+   import { createApp } from '@alumic/templates-core';
+   import template from './template';
+
+   export function App() {
+     const app = createApp(template);
+
+     onMount(async () => {
+       await app.boot();
+       await template.entry?.(app);
+     });
+
+     onCleanup(() => app.shutdown());
+
+     return (
+       <Canvas onReady={...}>
+         <HUD />
+       </Canvas>
+     );
+   }
+
+4. template.ts:
+   export default defineTemplate({
+     name: 'topdown-action',
+     plugins: [threeWebGL(), input(), ...],
+     entry: async (app) => {
+       app.startSession();
+       app.pushScene('main');
+       app.addPlayer('player-1');
+     },
+   });
+```
+
+## Planned Templates
+
+| Template | Genre | Key Plugins | Description |
+|----------|-------|-------------|-------------|
+| `topdown-action` | Action | render, input, state, ability | WASD movement, combat, abilities |
+| `tactics` | Strategy | render, input, state, ability | Turn-based grid combat |
+| `narrative` | Adventure | render, dialogue, flow, state | Story-driven with branching dialogue |
+| `survival` | Survival | render, input, state, ability, save | Crafting, inventory, day/night cycle |
+| `vehicle` | Racing/Driving | render, input, state | Vehicle physics, track-based |
+| `management` | Simulation | render, input, state, save | Resource management, building |
+| `rpg-lite` | RPG | render, input, dialogue, ability, save | Full RPG with quests, inventory, combat |
+
+## createApp Helper
+
+```typescript
+/**
+ * Create an App instance from a template definition.
+ * Handles plugin collection, app config, and template registration.
+ */
+export function createApp(template: TemplateDefinition): App {
+  const app = new App({
+    plugins: [
+      ...template.plugins,
+      // Register template-specific subsystems as a plugin
+      templateSubsystemsPlugin(template.subsystems ?? []),
+    ],
+    ...template.appConfig,
+  });
+  return app;
+}
+```
+
+## Project Creation: Two Paths
+
+Per [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4) and [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), new projects can be created from two surfaces. Both produce a server-side project with a server-issued UUID ([ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid)) and a cloned copy of the template's seed entities.
+
+### Path 1 — SaaS web UI (default)
+
+1. User clicks **New Project** in alumic.app.
+2. Picks a template from the marketplace.
+3. Backend creates a project row, clones the template's seed entities into Postgres, uploads template assets to object storage.
+4. User lands in the editor with the new project open. No local files involved.
+
+### Path 2 — Local CLI ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware))
+
+```bash
+alumic login                    # PAT device flow — [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)
+alumic create my-game \
+    --template topdown-action \
+    --workspace my-studio
+
+# This will:
+# 1. Call POST /api/workspaces/:id/projects { template: 'topdown-action' }
+#    → server seeds a project identical to Path 1 with a server-issued UUID
+# 2. Create a local directory 'my-game' with:
+#      project.json            — stamped per [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid) (UUID, workspaceId)
+#      src/, public/           — local template-author scaffolding (if applicable)
+#      data/entities/          — exported snapshot of seed entities (optional)
+# 3. Run 'bun install' if a package.json ships with the template
+# 4. Print next steps
+
+cd my-game
+alumic pull                     # refresh local .entity.json export
+bun dev                         # template-author dev server (local Vite HMR; see [CLI](/guides/cli))
+```
+
+The local directory is **not** the source of truth — the server is ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)). Local files are a working copy for template authoring and git workflows. Schema validation, reference extraction, and conflict detection all happen server-side on every push ([ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)).
+
+> **Binary assets never ship in `public/`.** Template authors place bytes under `data/assets/blobs/<sha256>` ([ADR-039 Templates ship seed content under data/entities/ + data/assets/](/decisions/039-template-seed-format)). The publish pipeline uploads blobs to object storage, mints asset IDs in the target project, and rewrites entity references during seeding ([ADR-048 Template install seeds entities and rewrites refs server-side](/decisions/048-template-install-seed)). A stray `public/assets/*.png` in the template package will not reach installed projects — it only affects the author's own Vite dev preview.
+
+### Electrobun desktop (local-single-user)
+
+On a single-user desktop Alumic install, the API base URL is `http://127.0.0.1:<port>`. `alumic create` still works, `alumic login` is a local-only setup step, and all flows are otherwise identical. The same codebase services hosted and local-single-user modes — no separate local-only fork.
+
+## Template vs Game
+
+A template is a **starting point**, not a final game. It provides:
+- Plugin composition (which systems are active)
+- Sample data (example dialogues, items, abilities)
+- Sample scenes
+- UI components
+- Build configuration
+
+A game developer takes a template and:
+- Replaces sample data with their own content
+- Customizes or replaces UI components
+- Adds game-specific systems
+- Modifies the entry flow
+- Adds additional plugins
+
+The template's value is that it provides a working, runnable game from minute one. The developer iterates from a working state rather than building from scratch.
+
+## Template Composition
+
+Templates can extend or compose other templates:
+
+```typescript
+import { baseNarrativePlugins } from '@alumic/template-narrative/plugins';
+
+export default defineTemplate({
+  name: 'mystery-game',
+  displayName: 'Mystery Game',
+  plugins: [
+    ...baseNarrativePlugins(),       // reuse narrative template's plugin set
+    inventoryPlugin(),                // add inventory
+    evidenceBoardPlugin(),            // add custom system
+  ],
+  // ...
+});
+```
+
+This encourages composition over forking — rather than copying a template and modifying it, extend it by composing its plugins with additional ones.

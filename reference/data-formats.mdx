@@ -1,0 +1,419 @@
+---
+title: "Data Formats"
+description: ".entity.json, .graph.json, .def.json, .strings.csv, .save.json."
+icon: "file-code"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim), [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side)
+</Info>
+
+## Overview
+
+Alumic enforces a strict three-layer separation for all game data. This prevents the "pollution" problem where runtime mutations leak into authored content, editor metadata bloats the runtime bundle, or save files entangle static definitions with mutable state.
+
+> **SaaS-first note.** Under the primary deployment (alumic.app, on-prem Fastify + Postgres), authored content lives in the backend as entity rows (see [Entity Graph](/reference/entity-graph)). The file formats in this chapter are the **export/import and on-prem seeding format** — what the backend emits when a user runs `alumic export`, and what it ingests when importing a project directory. Phase 1 uses an in-memory shim ([ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim)) that mirrors the same shapes. See [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first) and [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation).
+
+## The Three Layers
+
+| Layer | Server-side (primary) | Export format | Mutability | Loaded By | Purpose |
+|---|---|---|---|---|---|
+| **Authored Content** | `entities.data` column | `.entity.json`, `.graph.json`, `.def.json`, `.strings.csv` | Frozen at runtime | Runtime + Editor | Game content: dialogue trees, item defs, skill graphs |
+| **Editor Metadata** | `entities.editor_metadata` column ([ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field)) | `.layout.json` sidecar | Never served to runtime clients | Editor only | Visual layout: node positions, colors, viewport, comments |
+| **Runtime State** | `save_slots.data` ([Save System](/reference/save-system)) | `.save.json` via `alumic export` | Mutable | Runtime only | Current node, inventory, variables, visit counts |
+
+### Why This Separation Matters
+
+1. **Authored content is immutable at runtime.** An entity's `data` is frozen after load. Systems read from it but never write to it. This means content can be safely shared across multiple game instances, cached aggressively, and validated once on the server on write ([ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)).
+
+2. **Editor metadata never ships to runtime clients.** Node positions, colors, and comments are authoring affordances. They live in `entities.editor_metadata` and are served only via `?include=editor` ([ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field)). Runtime clients receive minimal payloads.
+
+3. **Runtime state is the only mutable layer.** Current dialogue node, inventory contents, variable values — all mutable state lives in subsystem state objects and is serializable through the save system ([Save System](/reference/save-system)). Authored content is loaded from the entity database; runtime state is restored from the save slot.
+
+## Authored Content Formats
+
+### .graph.json — Node Graphs
+
+Used for any branching/connected structure: dialogue trees, quest graphs, skill trees, flow graphs.
+
+```json
+{
+  "$schema": "alumic://schemas/graph.json",
+  "id": "intro-dialogue",
+  "version": 1,
+  "entryNodeId": "node-001",
+  "nodes": [
+    {
+      "id": "node-001",
+      "type": "dialogue",
+      "data": {
+        "speaker": "narrator",
+        "lineId": "intro.001",
+        "text": "Welcome, traveler."
+      },
+      "ports": {
+        "out": [
+          { "id": "port-001-a", "targetNodeId": "node-002", "targetPortId": "in" }
+        ]
+      }
+    },
+    {
+      "id": "node-002",
+      "type": "choice",
+      "data": {
+        "prompt": "intro.002"
+      },
+      "ports": {
+        "choices": [
+          {
+            "id": "port-002-a",
+            "label": "intro.002a",
+            "targetNodeId": "node-003",
+            "targetPortId": "in",
+            "condition": { "op": "gte", "var": "player.level", "value": 5 }
+          },
+          {
+            "id": "port-002-b",
+            "label": "intro.002b",
+            "targetNodeId": "node-004",
+            "targetPortId": "in"
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+**Key design decisions:**
+- Nodes have typed `data` payloads (the `type` field determines the schema)
+- Connections are explicit via `ports` with `targetNodeId` + `targetPortId`
+- Conditions on edges are declarative objects, not code strings
+- Text uses line IDs (`lineId`) that reference `.strings.csv` for localization
+- Each graph has a `version` field for schema migration
+
+### .def.json — Definition Tables
+
+Used for flat or lightly nested data: items, abilities, status effects, NPCs.
+
+```json
+{
+  "$schema": "alumic://schemas/def.json",
+  "type": "item",
+  "version": 1,
+  "entries": [
+    {
+      "id": "sword-iron",
+      "name": "items.sword_iron.name",
+      "description": "items.sword_iron.desc",
+      "icon": "018f-asset-sword-iron",
+      "tags": ["Equipment.Weapon.Sword", "Tier.Common"],
+      "stats": {
+        "damage": 10,
+        "weight": 3.5
+      },
+      "stackable": false,
+      "maxStack": 1
+    },
+    {
+      "id": "potion-health",
+      "name": "items.potion_health.name",
+      "description": "items.potion_health.desc",
+      "icon": "018f-asset-potion-red",
+      "tags": ["Consumable.Potion", "Tier.Common"],
+      "effects": [
+        { "type": "heal", "amount": 50 }
+      ],
+      "stackable": true,
+      "maxStack": 99
+    }
+  ]
+}
+```
+
+**Key design decisions:**
+- Entries are flat rows with an `id` field
+- Text fields use localization keys, not raw strings
+- Tags reference the hierarchical tag system
+- The `type` field determines which Zod schema validates the entries
+- Effects and stats are typed sub-objects, not arbitrary key-value pairs
+- `icon` is an **Asset entity ID** ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)), not a file path — resolved at read time via `ctx.assets.load(id)`. File export emits bytes under `assets/blobs/<sha256>` with a `manifest.json` mapping IDs to hashes ([Asset Management](/reference/asset-management)).
+
+### .strings.csv — Localization Tables
+
+Used for all player-facing text. Follows the Yarn Spinner pattern.
+
+```csv
+id,en,es,ja
+intro.001,"Welcome, traveler.","Bienvenido, viajero.","ようこそ、旅人。"
+intro.002,"What will you do?","¿Qué harás?","どうしますか？"
+intro.002a,"I seek adventure.","Busco aventura.","冒険を求めています。"
+intro.002b,"Just passing through.","Solo estoy de paso.","通りすがりです。"
+items.sword_iron.name,"Iron Sword","Espada de hierro","鉄の剣"
+items.sword_iron.desc,"A sturdy iron blade.","Una hoja de hierro resistente.","頑丈な鉄の刃。"
+```
+
+**Key design decisions:**
+- Line IDs are dot-separated and namespaced to their source (e.g., `intro.*` for dialogue, `items.*` for item names)
+- CSV format is human-editable and diff-friendly
+- Each column is a locale code (BCP 47)
+- The first column after `id` is the default/fallback locale
+- Runtime loads only the active locale's column into memory
+
+## Editor Metadata Format
+
+### .layout.json — Visual Layout Sidecar
+
+```json
+{
+  "graphId": "intro-dialogue",
+  "viewport": { "x": 0, "y": 0, "zoom": 1.0 },
+  "nodes": {
+    "node-001": { "x": 100, "y": 200, "color": "#4a9eff", "comment": "Entry point" },
+    "node-002": { "x": 300, "y": 200, "color": "#ff9f43", "collapsed": false },
+    "node-003": { "x": 500, "y": 100 },
+    "node-004": { "x": 500, "y": 300 }
+  },
+  "groups": [
+    {
+      "id": "group-1",
+      "label": "Introduction Sequence",
+      "nodeIds": ["node-001", "node-002"],
+      "color": "#2d3436"
+    }
+  ]
+}
+```
+
+**Rules:**
+- Layout files are **sidecar** files — they sit next to their `.graph.json` counterparts
+- The `graphId` field links the layout to its graph
+- Layout data is NEVER loaded at runtime — only by the editor
+- Missing layout data is fine — the editor generates default positions
+- Layout files can be gitignored in production builds
+
+## Zod Validation Schemas
+
+All authored content is validated at load time using Zod schemas. This catches malformed content early — at authoring time or build time, never at runtime crash time.
+
+### Graph Schema
+
+```typescript
+import { z } from 'zod';
+
+const ConditionSchema = z.object({
+  op: z.enum(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'has', 'not']),
+  var: z.string(),
+  value: z.union([z.string(), z.number(), z.boolean()]),
+});
+
+const PortSchema = z.object({
+  id: z.string(),
+  targetNodeId: z.string(),
+  targetPortId: z.string(),
+  label: z.string().optional(),
+  condition: ConditionSchema.optional(),
+});
+
+const GraphNodeSchema = z.object({
+  id: z.string(),
+  type: z.string(),
+  data: z.record(z.unknown()),
+  ports: z.record(z.array(PortSchema)).optional(),
+});
+
+export const GraphSchema = z.object({
+  $schema: z.string().optional(),
+  id: z.string(),
+  version: z.number().int().positive(),
+  entryNodeId: z.string(),
+  nodes: z.array(GraphNodeSchema),
+});
+
+export type Graph = z.infer<typeof GraphSchema>;
+```
+
+### Definition Schema
+
+```typescript
+const DefEntrySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().optional(),
+  icon: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+}).passthrough(); // allow additional fields for specific def types
+
+export const DefTableSchema = z.object({
+  $schema: z.string().optional(),
+  type: z.string(),
+  version: z.number().int().positive(),
+  entries: z.array(DefEntrySchema),
+});
+
+export type DefTable = z.infer<typeof DefTableSchema>;
+```
+
+### Type-Specific Schema Extension
+
+Each content type (items, abilities, dialogue nodes) extends the base schema:
+
+```typescript
+const ItemDefSchema = DefEntrySchema.extend({
+  stats: z.record(z.number()).optional(),
+  stackable: z.boolean().default(false),
+  maxStack: z.number().int().positive().default(1),
+  effects: z.array(z.object({
+    type: z.string(),
+    amount: z.number().optional(),
+    duration: z.number().optional(),
+  })).optional(),
+});
+```
+
+## Validation Pipeline
+
+Validation runs **server-side on write** ([ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)). Under SaaS-first, the server is the single point where entity payloads are parsed against their Zod schemas, refs are extracted, and the reverse index is updated. Two subsidiary stages help authors catch errors earlier.
+
+### 1. Authoring-Time (Editor / IDE) — advisory
+
+- JSON Schema files (`alumic://schemas/*.json`) enable IDE autocompletion and inline errors.
+- Zod schemas run on keystroke in the editor and surface errors inline — a non-authoritative preview of what the server would reject.
+
+### 2. Server-Side on Write (authoritative)
+
+- Zod parse of the submitted entity payload against the type's schema.
+- Ref extraction and reverse-index update.
+- Full-graph link pass: verify all `targetNodeId` references resolve to existing nodes in the project.
+- Cycle detection: flag infinite loops in dialogue/quest graphs (or mark intentional cycles).
+- Unreachable node detection: nodes with no incoming edges (except the entry node).
+- Duplicate ID detection: no two nodes/entries share an ID within a graph/table.
+- Localization completeness: every `lineId` referenced by a graph has an entry in the project's string tables.
+- Tag validation: every tag referenced in data exists in the workspace's tag registry.
+- On any failure, the write is rejected with a structured error ([Entity API](/reference/entity-api) error envelope).
+
+### 3. Offline / Export (CLI) — convenience
+
+`alumic validate` runs the same suite locally against a file-exported project. Useful for pre-commit hooks, on-prem seeding checks, and offline authoring. Always redundant with (2) on SaaS deployments — (2) is authoritative.
+
+Runtime clients consume pre-validated data from the API and skip the Zod parse in the hot path. Development builds may optionally re-validate to catch backend version skew (`ALUMIC_DEV_REVALIDATE=1`).
+
+## Export File Layout
+
+Under SaaS, authored content lives in the entity database ([Entity Graph](/reference/entity-graph)). `alumic export` ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)) writes a round-trip-able directory for Git workflows, on-prem seeding, and offline authoring:
+
+```
+data/
+├── entities/                        # per-entity JSON (see [Entity Graph](/reference/entity-graph))
+│   ├── characters/
+│   ├── locations/
+│   ├── dialogues/
+│   ├── quests/
+│   ├── lore/
+│   └── scenes/
+├── strings/
+│   ├── dialogues.strings.csv
+│   ├── items.strings.csv
+│   └── ui.strings.csv
+└── assets/
+    ├── manifest.json                # [{id, sha256, kind, contentType, bundle}, ...]
+    └── blobs/
+        └── <first-2-of-sha>/<full-sha>
+```
+
+Legacy `.graph.json` / `.def.json` / `.layout.json` paths remain supported as on-prem seeding inputs; new exports prefer the `.entity.json` shape ([Entity Graph](/reference/entity-graph)) so the same file can round-trip without information loss.
+
+## Layout / Editor Metadata Under SaaS
+
+In the SaaS deployment, the `.layout.json` content lives as a separate `editor_metadata` field on the entity row ([ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field)). Two API variants expose the split:
+
+- `GET /api/entities/:id` returns `{ id, type, name, tags, data }` — runtime view, layout omitted.
+- `GET /api/entities/:id?include=editor` also returns `editor_metadata` — editor view.
+
+This replaces the "publish step strips `.layout.json`" pattern from the research. There is no client-side build step that enforces the split; the API contract does it. File export emits `.entity.json` + `.layout.json` sidecars for round-trip.
+
+## Runtime Loading
+
+Runtime clients read authored content through the entity API ([Entity API](/reference/entity-api)) — never via static file imports.
+
+```typescript
+// Browser runtime — resolve an entity by ID
+const intro = await ctx.entities.get<DialogueGraph>('intro-dialogue');
+
+// Engine plugin — resolve from the local mirror ([Engine Plugin](/platform/engine-plugin), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol))
+var intro = AlumicClient.Entities.Get<Dialogue>("intro-dialogue");
+```
+
+Static JSON imports remain available only for Phase-1 template seeding ([ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim)): a template ships `.entity.json` files under `data/entities/` that the shim loads into the in-memory entity database at App boot. Once Phase 2's backend lands, the same seed content is uploaded into the server's entity table at template install time and the file-import path is no longer used at runtime.
+
+The Phase-1 shim's seeding path performs `JSON.parse` + Zod parse + `Object.freeze` on entity rows it ingests; the Phase-2 backend performs the same validation server-side on ingest ([ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)). In both phases the runtime reads already-validated data through `EntityDatabase` / `EntityCache` — never from disk.
+
+## FieldType — Portable Component Schemas
+
+ECS components (when using `@alumic/ecs`, Phase 2) are defined with a **portable schema** that maps each field to a transpilable primitive:
+
+```typescript
+export type FieldType =
+  | 'f32' | 'f64' | 'i32' | 'u32' | 'bool' | 'str'
+  | { array: FieldType; length: number }
+  | { ref: 'entity' };
+
+export interface ComponentSchema {
+  readonly name: string;
+  readonly fields: Record<string, FieldType>;
+}
+```
+
+The `FieldType` enum is the mechanism behind the "engine-portable systems" claim in [Alumic](/): transpilers walk a component schema and emit native struct definitions — C# `float` for `f32`, Rust `[f32; 3]` for `{array: 'f32', length: 3}`, an engine-specific entity handle for `{ref: 'entity'}`. Components authored in `FieldType` shape are portable by construction; components authored as arbitrary TS objects (outside `@alumic/ecs`) are not. See [ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed).
+
+## Portable TS Subset
+
+[ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side) commits the server-side transpile pipeline to emit C# / C++ / GDScript/GDExtension from a constrained subset of TypeScript. A module is "portable" only if every exported function and component it declares stays inside this subset. Outside the subset a module is still valid Alumic code, but publish-time transpile rejects it for targets that need native code.
+
+**Allowed:**
+
+- Plain functions whose parameters and returns are `FieldType`-shaped component schemas (`ComponentSchema` above), scalar primitives (`number`, `boolean`, `string`, literal unions), typed arrays of fixed length, and entity refs via `{ ref: 'entity' }`.
+- `const` and `let` bindings on values whose static type is within the subset. `readonly` arrays and `as const` literals.
+- Arithmetic, comparison, and logical operators on scalar primitives. Branching (`if`, `switch`), bounded `for` loops, `for…of` over typed arrays of known length, `while` with a termination invariant.
+- Calls into other portable functions and into `@alumic/ecs` / `@alumic/core` APIs documented as portable. The portable API surface lives in `@alumic/portable-api` and is a strict subset of the runtime API.
+- Pure enums (`const enum` or `as const` maps). Tagged unions discriminated by a single string field.
+
+**Not allowed:**
+
+- Dynamic dispatch and runtime metaprogramming: `eval`, `new Function`, `Proxy`, `Reflect`, decorators, dynamic `import()`.
+- Reflection-like patterns: `Object.keys(x)` when `x` is typed `Record<string, …>` with no static upper bound, `typeof x === '…'` narrowing on values with dynamic types.
+- `any`, `unknown` without discriminated narrowing, untyped `Record`, or `object`-typed parameters.
+- Promises, async/await, generators, iterators beyond typed arrays. Portable game logic is synchronous; the host engine owns scheduling.
+- Direct DOM, Node, Bun, or Three.js APIs. Audio, I/O, and platform access live outside the subset by design.
+- Class inheritance hierarchies. Components are plain records; behavior is free functions. Interfaces with a single implementation are allowed; virtual dispatch is not.
+- Closures captured across function boundaries where the captured state is mutable. Pure closures are allowed.
+
+**Enforcement.** The publish pipeline runs `alumic transpile --check` on every module a plugin declares as portable. Violations surface as publish-time errors keyed to the TypeScript source location. `alumic transpile --target <engine>` is also available as a CLI convenience for local iteration ([CLI](/guides/cli)); it runs the same check before emission.
+
+**Rationale.** Each restriction maps to a feature the target languages either lack or implement incompatibly: C# structs can't host closures over runtime state; GDScript has no concept of ad-hoc reflection; C++ can't execute `eval`. Keeping the subset narrow means the transpiler stays single-pass and deterministic.
+
+## Conditions and Expressions
+
+Conditions on graph edges and in effect triggers use a declarative expression format — no `eval()`, no code strings.
+
+```typescript
+type Condition =
+  | { op: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'; var: string; value: string | number | boolean }
+  | { op: 'has' | 'not'; var: string }              // boolean flag checks
+  | { op: 'and' | 'or'; conditions: Condition[] }    // logical combinators
+  | { op: 'visited'; nodeId: string }                 // graph-specific: has this node been visited?
+  | { op: 'count'; var: string; cmp: 'gt' | 'gte' | 'lt' | 'lte' | 'eq'; value: number }; // array/set count
+```
+
+Conditions are evaluated by a `ConditionEvaluator` that receives a variable context:
+
+```typescript
+interface VariableContext {
+  get(path: string): unknown;
+  has(path: string): boolean;
+}
+
+function evaluateCondition(condition: Condition, ctx: VariableContext): boolean;
+```
+
+The variable context is populated by subsystem state — player stats, inventory contents, quest progress, dialogue visit counts.

@@ -1,0 +1,55 @@
+---
+title: "ADR-017: Shared VariableRegistry in @alumic/core"
+description: "`@alumic/core` exports a `VariableRegistry`:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Three subsystems reach for the same abstraction:
+
+- **Flow conditions** — `{ op: 'gte', var: 'player.level', value: 5 }` on a dialogue edge.
+- **UI bindings** — `{ property: 'fillPercent', source: 'player.health / player.maxHealth' }` on a HUD element.
+- **Dialogue set-var / get-var nodes** — `player.reputation.merchant`.
+
+Each references a dotted-path variable namespace (`player.*`, `quest.*`, `inventory.*`, `local.*`). Under three separate registries they would drift. Under one shared registry they share a single source of truth for "what `player.health` means" across flow, UI, and dialogue.
+
+## Decision
+
+`@alumic/core` exports a `VariableRegistry`:
+
+```ts
+export interface VariableProvider {
+  readonly prefix: string;       // 'player', 'quest', 'inventory'
+  get(path: string): unknown;    // full path including prefix
+  has(path: string): boolean;
+  set?(path: string, value: unknown): void;  // optional; read-only providers omit
+}
+
+export interface VariableRegistry {
+  register(provider: VariableProvider): Disposable;
+  resolve(path: string): unknown;       // dispatches by prefix
+  has(path: string): boolean;
+  // Scope-aware 'local' paths are resolved by the caller (flow runner, UI binder)
+  // before hitting the registry; the registry itself handles cross-system paths.
+}
+```
+
+Plugins register providers via `ctx.variables.register(...)`. Flow conditions, UI bindings, and dialogue variable reads all query `ctx.variables.resolve(path)`.
+
+## Consequences
+
+**Enables:** Adding a new subsystem (say, `weather.*` or `multiplayer.peer1.*`) exposes it to every query mechanism at once. Tooling — autocomplete in the UI binding editor, validation of flow conditions — consults one registry.
+
+**Obligates:** Collision policy: prefix collisions on `register()` throw. Read-only providers that fail `set()` throw with a clear error. The registry is scoped to `Session` (same lifetime as the game-state subsystems it queries).
+
+**Forecloses:** Per-subsystem isolation. A bug in one provider can affect all three consumers. Offset by keeping providers small and well-tested.
+
+## Related
+
+- Specs: [State Machines](/reference/state-machines), [Authoring Flow and State](/guides/flow-and-state), [Dialogue System](/reference/dialogue-system), [Authoring Dialogue](/guides/dialogue), [UI Integration](/reference/ui-integration), [UI Designer](/reference/ui-designer), [Designing UI](/guides/ui-design), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database)
+- Findings resolved: audit-2 #05.
+- Depends on: [ADR-011 Disposable is a bare cleanup function](/decisions/011-disposable-shape).
+- Informs: [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api).

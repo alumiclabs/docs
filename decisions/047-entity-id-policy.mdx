@@ -1,0 +1,37 @@
+---
+title: "ADR-047: Entity IDs are project-scoped author slugs; rename via a server RPC"
+description: "- Entity IDs are **project-scoped strings** (not globally unique)."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Spec 23 allows entity IDs to be either UUIDs or author-written slugs (`old-hermit`). This is an ergonomic choice — slugs show up in graph JSON and dialogue data and are easier to read in diffs — but the corpus never formalized the uniqueness, collision, or rename story. The composite primary key `(project_id, id)` in the Postgres schema (spec 19) implies project-scoping but the rename and cross-project-export stories were left implicit.
+
+## Decision
+
+- Entity IDs are **project-scoped strings** (not globally unique). The database PK is `(project_id, id)`.
+- Authors write **slugs** (kebab-case preferred) directly in entity data and in graph references. The client library exposes a `mintEntityId(name)` helper that slugifies + disambiguates on collision (`old-hermit-2`) but never forces UUIDs.
+- **Uniqueness** is enforced by the backend on create and on ID-rename. Conflicts return `409 Conflict` with the colliding entity's type and name.
+- **Renames** go through `POST /api/projects/:pid/entities/:id/rename` with `{ newId }`. The server runs atomically:
+  1. Inserts a new row with `newId` and the full data of the old entity; sets `version = 1`.
+  2. Updates every inbound `entity_refs` row (source entities re-written per [ADR-053 Delete-with-backlinks nulls inbound refs and writes new source versions](/decisions/053-delete-with-backlinks-fanout)'s cascade shape — each source gets a new `entity_versions` entry).
+  3. Deletes the old row.
+  4. Emits `Entity.Renamed { oldId, newId, type }` on the sync stream; clients with the old ID cached re-key to `newId` on receipt.
+- **`alumic export`** preserves slugs verbatim. **`alumic import`** uses [ADR-048 Template install seeds entities and rewrites refs server-side](/decisions/048-template-install-seed)'s entity-ID rewrite map: on collision into an existing project, the installer slugify-disambiguates (`old-hermit` → `old-hermit-import-1`) and records the mapping so inbound refs resolve to the renamed import.
+
+## Consequences
+
+**Enables:** Slugs stay in author-facing data. Diffs are readable. Rename is a typed operation, not a find-and-replace. Cross-project imports never silently overwrite.
+
+**Obligates:** Every client must handle `Entity.Renamed` events (the sync stream now has four kinds: created, updated, deleted, renamed). The engine-plugin mirror re-keys its row on receipt. Backlink indexes are naturally kept current because inbound refs are rewritten in the same transaction.
+
+**Forecloses:** Treating an entity ID as globally unique. References always travel with a `projectId` context. UUIDs are available for authors who prefer opacity — the schema does not care — but are not the default.
+
+## Related
+
+- Specs: [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints), [CLI](/guides/cli), [Validation](/guides/validation), [Testing](/guides/testing), [Debugging](/guides/debugging)
+- Depends on: [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log), [ADR-048 Template install seeds entities and rewrites refs server-side](/decisions/048-template-install-seed), [ADR-053 Delete-with-backlinks nulls inbound refs and writes new source versions](/decisions/053-delete-with-backlinks-fanout).
+- Informs: [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol) (sync event shape).

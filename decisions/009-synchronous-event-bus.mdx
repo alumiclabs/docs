@@ -1,0 +1,34 @@
+---
+title: "ADR-009: Event bus is strictly synchronous"
+description: "The event bus is strictly synchronous."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Chapter 6 ([Event Bus](/reference/event-bus)) describes the bus as "lightweight synchronous observable" — `emit()` calls all handlers inline, no microtask deferral, no promise wrapping. But chapters 7 ([Scheduler](/reference/scheduler)) and 1 ([Architecture](/reference/architecture)) listed "event flush" as a step in the PostUpdate phase, implying queued delivery. The audit flagged this as a direct contradiction.
+
+A synchronous bus is the **lighter** option, not the heavier one: `emit()` is a function-call loop with zero allocation per event. A queued bus would cost more (per-event queue entries, two passes, GC pressure). It would also break the predictable frame-ordering guarantee that 06 calls out ("no events leaking across phases").
+
+"Event flush" language had crept in from a different mental model (Bevy-style event drain) and no longer matched the design.
+
+## Decision
+
+The event bus is strictly synchronous. `emit()` delivers to all subscribers inline and returns before the next statement runs. There is no deferred-channel primitive, no event flush, no queue.
+
+Game code that needs to buffer events (e.g., collect all damage events during Update, apply at PostUpdate) maintains its own array and clears it at the end of the frame — the existing pattern documented in 06's "Event Buffering" section.
+
+## Consequences
+
+**Enables:** Predictable frame ordering. All events emitted during PreUpdate are fully processed before Update runs. No ordering subtleties across tick phases.
+
+**Obligates:** Subscribers must not throw (or must catch their own errors). A throw in one handler aborts the emit early. Handler ordering is insertion-order and should not be relied upon by independent subscribers.
+
+**Forecloses:** The "event flush" language in 07 and 01. Those passages must be rewritten to remove references to queued events.
+
+## Related
+
+- Specs: 01-architecture.md line 95; 06-event-bus.md; 07-scheduler.md lines 48-50
+- Findings resolved: audit-2 #01.

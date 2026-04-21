@@ -1,0 +1,384 @@
+---
+title: "Subsystem Hierarchy"
+description: "Four-scope lifecycle tree — App, Session, Scene, Player."
+icon: "layer-group"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-012 Scheduler appends scene-scope systems to end of phase](/decisions/012-scheduler-append-on-push)
+</Info>
+
+## Overview
+
+Subsystems are **scoped singletons** — typed state containers that automatically initialize when their scope is entered and deinitialize when it exits. They are the primary mechanism for plugins to hold and manage state.
+
+Unlike global singletons, subsystems are lifecycle-aware. A Scene-scope subsystem (like a physics world) only exists while its scene is active. When the scene is popped, the subsystem is torn down and its resources released. This prevents resource leaks and eliminates a class of bugs where stale state from a previous scene bleeds into the next one.
+
+## The Four Scopes
+
+```
+App                          (process lifetime)
+└── Session                  (one play-through / save file)
+    └── Scene                (active level / screen)
+        └── Player           (per-local-player)
+```
+
+| Scope | Lifetime | Created When | Destroyed When | Example Subsystems |
+|-------|----------|-------------|----------------|-------------------|
+| `App` | Entire process / tab | `App.boot()` | `App.shutdown()` | Audio engine, render kernel, asset cache, global settings |
+| `Session` | One save file / play-through | `app.startSession()` | `app.endSession()` | Player profile, world state, game clock, quest journal |
+| `Scene` | Active level or screen | `app.pushScene()` | `app.popScene()` or `app.replaceScene()` | Physics world, AI manager, spawner, scene-local audio |
+| `Player` | Per-local-player | `app.addPlayer()` | `app.removePlayer()` | Input state, camera controller, HUD state, player inventory |
+
+### Scope Nesting Rules
+
+- `Session` requires `App` to be booted
+- `Scene` requires an active `Session`
+- `Player` requires an active `Session` (does NOT require a `Scene`)
+- Multiple `Player` scopes can be active simultaneously (local multiplayer)
+- Multiple `Scene` scopes can exist on the stack, but only the top scene ticks
+
+Attempting to enter a scope without its parent active is an error:
+
+```
+SubsystemError: Cannot pushScene() — no active session. Call startSession() first.
+```
+
+## Defining Subsystems
+
+### The defineSubsystem Factory
+
+```typescript
+/**
+ * Define a subsystem at a given scope.
+ *
+ * @typeParam T - The shape of the subsystem's state object
+ * @param scope - When this subsystem is alive (App, Session, Scene, Player)
+ * @param build - Factory function that returns the subsystem's lifecycle config
+ * @returns A SubsystemHandle<T> used to register and retrieve the subsystem
+ */
+export function defineSubsystem<T>(
+  scope: Scope,
+  build: (ctx: AppContext) => SubsystemConfig<T>,
+): SubsystemHandle<T>;
+```
+
+### SubsystemConfig
+
+```typescript
+export interface SubsystemConfig<T> {
+  /**
+   * Called once when the scope is entered.
+   * Returns the subsystem's state object.
+   * May be async (e.g., for loading assets).
+   */
+  init(ctx: AppContext): T | Promise<T>;
+
+  /**
+   * Called once when the scope is exited.
+   * Clean up resources, unsubscribe from events, etc.
+   */
+  deinit?(state: T, ctx: AppContext): void;
+
+  /**
+   * Called every tick while the scope is active.
+   * Use for per-frame subsystem logic.
+   * Subsystems with tick() are automatically registered with the scheduler.
+   */
+  tick?(state: T, tick: TickContext, ctx: AppContext): void;
+
+  /**
+   * The scheduler phase at which tick() runs.
+   * Default: Phase.Update
+   */
+  tickPhase?: Phase;
+
+  /**
+   * Called when the scope is suspended (e.g., scene pushed on top).
+   * Only relevant for Scene scope.
+   */
+  suspend?(state: T, ctx: AppContext): void;
+
+  /**
+   * Called when the scope is resumed (e.g., scene popped above).
+   * Only relevant for Scene scope.
+   */
+  resume?(state: T, ctx: AppContext): void;
+}
+```
+
+### SubsystemHandle
+
+```typescript
+export interface SubsystemHandle<T> {
+  /** Internal unique identifier. */
+  readonly id: symbol;
+
+  /** The scope this subsystem belongs to. */
+  readonly scope: Scope;
+
+  /**
+   * Type brand — only exists for TypeScript inference.
+   * Never read at runtime.
+   */
+  readonly __type: T;
+}
+```
+
+The handle is a lightweight descriptor that carries no state. It is used as a key to register the subsystem (in `plugin.build()`) and to retrieve its state (via `ctx.get()`).
+
+## Usage Patterns
+
+### Basic Subsystem
+
+```typescript
+import { defineSubsystem, Scope } from '@alumic/core';
+
+interface PhysicsState {
+  world: PhysicsWorld;
+  bodies: Map<string, RigidBody>;
+}
+
+export const PhysicsSubsystem = defineSubsystem<PhysicsState>(
+  Scope.Scene,
+  (ctx) => ({
+    init() {
+      const world = new PhysicsWorld({ gravity: { x: 0, y: -9.81, z: 0 } });
+      return { world, bodies: new Map() };
+    },
+
+    deinit(state) {
+      state.world.destroy();
+      state.bodies.clear();
+    },
+
+    tick(state, { dt }) {
+      state.world.step(dt);
+    },
+
+    tickPhase: Phase.PreUpdate,
+  }),
+);
+```
+
+### Subsystem With Dependencies
+
+Subsystems access other subsystems via `ctx.get()`:
+
+```typescript
+export const CombatSubsystem = defineSubsystem<CombatState>(
+  Scope.Scene,
+  (ctx) => ({
+    init() {
+      // Access another subsystem's state
+      const physics = ctx.get(PhysicsSubsystem);
+
+      // Subscribe to events
+      const unsub = DamageDealt.on((e) => {
+        // Use physics for knockback
+        const body = physics.bodies.get(e.target);
+        if (body) body.applyImpulse(e.knockback);
+      });
+
+      return {
+        healthMap: new Map(),
+        disposables: [unsub],
+      };
+    },
+
+    deinit(state) {
+      state.disposables.forEach(d => d());
+      state.healthMap.clear();
+    },
+  }),
+);
+```
+
+### Async Initialization
+
+```typescript
+export const AssetSubsystem = defineSubsystem<AssetState>(
+  Scope.App,
+  (ctx) => ({
+    async init() {
+      // Select the asset source based on deployment mode (browser signed-URL,
+      // engine-plugin raw bytes, Phase-1 shim, on-prem). See [Asset Management](/reference/asset-management) and [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage).
+      const source = selectAssetSource(ctx);
+      const cache = new AssetCache(source);
+      // Prefetch any assets tagged as critical for boot (e.g., loading-screen art).
+      // The backend returns the id set; bytes flow via the source.
+      const critical = await source.listByBundle('Critical');
+      await cache.preload(critical.map(a => a.id));
+
+      return { cache, source };
+    },
+
+    deinit(state) {
+      state.cache.dispose();
+    },
+  }),
+);
+```
+
+### Player-Scoped Subsystem
+
+Player subsystems receive the player ID in their context:
+
+```typescript
+export const PlayerInputSubsystem = defineSubsystem<PlayerInputState>(
+  Scope.Player,
+  (ctx) => ({
+    init() {
+      // Each player gets their own input state
+      return {
+        actions: new Map<string, boolean>(),
+        axes: new Map<string, number>(),
+      };
+    },
+
+    tick(state, tick) {
+      // Poll input devices for this player
+      pollInputForPlayer(state);
+    },
+
+    tickPhase: Phase.PreUpdate,
+  }),
+);
+```
+
+## Lifecycle Behavior
+
+### Initialization Order
+
+When a scope is entered, its subsystems are initialized **in registration order** — the order in which `ctx.subsystem(handle)` was called across all plugins. Since plugins are built in dependency order, a subsystem registered by plugin A (which depends on plugin B) will be initialized after plugin B's subsystems.
+
+```
+Plugin B.build(ctx):
+  ctx.subsystem(PhysicsSubsystem);     // registered first
+
+Plugin A.build(ctx):
+  ctx.subsystem(CombatSubsystem);      // registered second
+
+// When scene is pushed:
+// 1. PhysicsSubsystem.init()   ← first
+// 2. CombatSubsystem.init()    ← second (can safely ctx.get(PhysicsSubsystem))
+```
+
+### Scheduler Insertion for Non-App Scopes
+
+When a scope is entered **after boot** (any `startSession`, `pushScene`, `addPlayer`), subsystems with a `tick()` method register with the scheduler at scope-push time. These `tick()` functions are **appended to the end of their phase** — dependency-order interleaving applies only to boot-time registration.
+
+Cross-plugin ordering requirements between late-registering Scene/Session/Player subsystems must therefore be expressed through `ctx.get()` calls inside the subsystem body, not relied on via scheduler order. See [ADR-012 Scheduler appends scene-scope systems to end of phase](/decisions/012-scheduler-append-on-push).
+
+### Deinitialization Order
+
+Subsystems are deinitialized in **reverse registration order** — the opposite of init. This ensures that a subsystem which depends on another is torn down first:
+
+```
+// When scene is popped:
+// 1. CombatSubsystem.deinit()   ← first (still has access to PhysicsSubsystem)
+// 2. PhysicsSubsystem.deinit()  ← second
+```
+
+### Scene Suspend/Resume
+
+When a new scene is pushed on top of an existing one:
+
+```
+app.pushScene('overworld');
+// overworld subsystems: init()
+
+app.pushScene('pause-menu');
+// overworld subsystems: suspend()     ← NOT deinit
+// overworld subsystems: tick() stops  ← no longer ticking
+// pause-menu subsystems: init()
+
+app.popScene();
+// pause-menu subsystems: deinit()
+// overworld subsystems: resume()      ← ticking resumes
+```
+
+The `suspend()` callback lets subsystems pause audio, freeze physics, or save transient state. The `resume()` callback lets them restart.
+
+### Cascade on Scope Exit
+
+When a parent scope exits, all child scopes are cleaned up first:
+
+```
+app.endSession();
+// 1. Remove all players → deinit all Player-scope subsystems
+// 2. Pop all scenes → deinit all Scene-scope subsystems
+// 3. Deinit all Session-scope subsystems
+```
+
+## Retrieving Subsystem State
+
+### ctx.get()
+
+```typescript
+// Inside a system function or event handler:
+const physics = ctx.get(PhysicsSubsystem);
+physics.world.step(dt);
+```
+
+`ctx.get()` is **synchronous** and returns the subsystem's state directly. It throws if:
+- The subsystem was never registered (no plugin called `ctx.subsystem(handle)`)
+- The subsystem's scope is not currently active (e.g., accessing a Scene subsystem when no scene is pushed)
+
+```
+SubsystemError: Cannot get PhysicsSubsystem — no active Scene scope.
+```
+
+### Type Safety
+
+The return type of `ctx.get(handle)` is inferred from the `SubsystemHandle<T>` generic parameter. No type assertions or casts are needed:
+
+```typescript
+const physics = ctx.get(PhysicsSubsystem);
+//    ^? PhysicsState — fully typed, IDE autocomplete works
+
+physics.world.step(dt);  // ✓ TypeScript knows world exists
+physics.nonexistent;      // ✗ Type error
+```
+
+## Design Rationale
+
+### Why Scopes Instead of Manual Lifecycle?
+
+Manual init/deinit leads to ordering bugs and resource leaks:
+
+```typescript
+// ✗ Manual — error-prone
+const physics = new PhysicsWorld();
+const combat = new CombatSystem(physics);
+// ... later, if you forget:
+// physics.destroy(); combat.cleanup();  // leak!
+```
+
+Scoped subsystems automate this:
+
+```typescript
+// ✓ Scoped — automatic
+const PhysicsSubsystem = defineSubsystem(Scope.Scene, ...);
+const CombatSubsystem = defineSubsystem(Scope.Scene, ...);
+// Kernel handles init order, deinit order, and cleanup on scope exit
+```
+
+### Why Not Dependency Injection?
+
+DI containers add complexity and indirection. Alumic uses a simpler model:
+- Subsystems declare their scope (when they're alive)
+- Plugins register subsystems during `build()` (declaring what exists)
+- Systems access subsystems via `ctx.get(handle)` (requesting what they need)
+
+This is explicit, debuggable, and type-safe without a DI framework.
+
+### Why Four Scopes?
+
+The four scopes map to natural game lifecycle boundaries:
+- `App` = global services that survive across save files
+- `Session` = one play-through's persistent state
+- `Scene` = one level or screen's transient state
+- `Player` = per-player state for local multiplayer
+
+These boundaries exist in every game. Making them first-class in the framework prevents ad-hoc lifetime management in user code.

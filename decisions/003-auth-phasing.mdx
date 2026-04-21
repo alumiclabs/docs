@@ -1,0 +1,41 @@
+---
+title: "ADR-003: Authentication and identity phasing"
+description: "Auth rolls out phase by phase:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)) makes authentication a Phase 2 concern. Phase 1 runs against an in-memory shim ([ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim)) with no backend, so no auth is needed. Phase 2 introduces the real backend, which implies user accounts, project ownership, and session handling.
+
+The choices for Phase 2 auth:
+- Email + password + JWT — standard, self-contained, portable to on-prem.
+- OAuth only (GitHub/Google) — fast to ship, but couples the project to third-party uptime and complicates on-prem.
+- Delegated to a hosted auth provider (Clerk, Supabase Auth, WorkOS) — fastest time-to-ship, adds an external dependency that on-prem customers inherit.
+
+Team features (invitations, roles, permissions), SSO, and audit logs are distinct from Phase 2's "users can have accounts" baseline.
+
+## Decision
+
+Auth rolls out phase by phase:
+
+- **Phase 1:** No auth. Single-user assumed; in-memory shim.
+- **Phase 2:** Email + password + JWT sessions. One user owns N projects. Passwords hashed with bcrypt or argon2id. OAuth (GitHub/Google) can be added as a secondary path in this phase if cheap.
+- **Phase 3:** Team invitations, per-project roles (owner/editor/viewer).
+- **Phase 4+:** SSO/SAML for enterprise on-prem. Optional audit logging behind a config flag.
+
+## Consequences
+
+**Enables:** On-prem deployments get the same auth stack as SaaS with no third-party dependency. Teams and permissions arrive alongside the marketplace ([ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4)), when they matter.
+
+**Obligates:** The backend codebase carries credential handling and session management directly. Standard hardening (rate-limit, breach monitoring, 2FA-ready session model) must be done in-house.
+
+**Forecloses:** A "Clerk-powered" ship-in-a-weekend auth layer. The trade-off is intentional; third-party auth providers are painful for on-prem.
+
+## Related
+
+- Specs: [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints), [Roadmap](/concepts/roadmap)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim).
+- Informs: [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model) (the Actor model extends this phasing with Agent identities as peers of Users without replacing the user-auth stack).

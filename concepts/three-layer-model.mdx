@@ -1,0 +1,46 @@
+---
+title: "Three-Layer Data Model"
+description: "Authored content vs editor metadata vs runtime state — the separation that keeps everything from polluting everything else."
+icon: "layer-group"
+---
+
+import { ThreeLayerTable } from '/snippets/three-layer-table.mdx';
+
+<Info>
+**Decisions shaping this page:** [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim), [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field)
+</Info>
+
+Alumic separates everything authored, every piece of editor-only metadata, and every piece of mutable runtime state into three disjoint layers. They share no fields, no storage columns, and no code paths. This is the load-bearing structural discipline behind SaaS-first, the entity graph, save files, and the editor's undo model — get this right and the rest of the system follows naturally.
+
+## Persistence model
+
+Under SaaS-first ([ADR-001](/decisions/001-saas-first)), the entity database is a backend service (Fastify + Postgres) that clients query over HTTP. Authored files on disk (`.graph.json`, `.entity.json`, `.layout.json`) are **export/import and on-prem-seeding format** — not the primary store. Phase 1 ships with an in-memory shim behind the same interface so the framework runs before the backend exists ([ADR-002](/decisions/002-phase-1-in-memory-shim)); Phase 2 drops in the real implementation.
+
+## The three layers
+
+<ThreeLayerTable />
+
+## Why it matters
+
+1. **Authored content is immutable at runtime.** An entity's `data` is frozen after load. Systems read from it but never write to it. Content is safely shared across game instances, cached aggressively, and validated once on the server on write ([ADR-013](/decisions/013-server-side-validation)).
+
+2. **Editor metadata never ships to runtime clients.** Node positions, colors, and comments are authoring affordances. They live in `entities.editor_metadata` and are served only via `?include=editor` ([ADR-014](/decisions/014-layout-separate-field)). Runtime clients get minimal payloads.
+
+3. **Runtime state is the only mutable layer.** Current dialogue node, inventory contents, variable values — all mutable state lives in subsystem state objects and is serializable through the [Save System](/reference/save-system). Authored content is loaded from the entity database; runtime state is restored from the save slot.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Data formats" icon="file-code" href="/reference/data-formats">
+    Concrete `.entity.json` / `.graph.json` / `.def.json` / `.strings.csv` shapes.
+  </Card>
+  <Card title="Entity graph" icon="share-nodes" href="/reference/entity-graph">
+    How authored entities reference each other and form a navigable graph.
+  </Card>
+  <Card title="Save system" icon="floppy-disk" href="/reference/save-system">
+    The runtime-state layer: chunked serialization with schema versioning.
+  </Card>
+  <Card title="Entity types and extractors" icon="table-columns" href="/reference/entity-types-and-extractors">
+    `defineEntityType`, the FieldType enum, reference extractors.
+  </Card>
+</CardGroup>

@@ -1,0 +1,35 @@
+---
+title: "ADR-008: Line IDs are author-written; CLI extracts .strings.csv"
+description: "Authors write human-readable IDs (`shop.greet.001`, `forest.hermit.farewell`) directly in dialogue/flow graph nodes."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Two candidate models for localization line IDs:
+
+1. **Generated hash IDs** (research): author writes raw text, a tool replaces the text with tags like `#line:abc123` on save and emits `.strings.csv`. IDs survive text edits but are unreadable in diffs.
+2. **Human-readable IDs** (spec example): author writes `shop.greet.001` by hand in dialogue nodes; the localization table uses the same string as its primary key. Readable in diffs; risks ID collisions and drift between the ID and the English text.
+
+The spec's example used (2) without resolving the authoring workflow: who writes the IDs, who produces `.strings.csv`.
+
+## Decision
+
+Authors write human-readable IDs (`shop.greet.001`, `forest.hermit.farewell`) directly in dialogue/flow graph nodes. A CLI command — `alumic extract-strings` — scans all graphs in the project, produces `.strings.csv` stubs (one row per unique `lineId`, empty translation columns), and reports duplicates, missing IDs, and stale entries (rows in CSV that no graph references).
+
+Under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)), the extraction runs server-side on save: when an entity is written, the backend updates the string table and flags translators. The CLI remains available for on-prem and file-export workflows.
+
+## Consequences
+
+**Enables:** Readable diffs, clear author intent, translator tooling operates on a flat CSV with stable primary keys.
+
+**Obligates:** Authors must maintain ID uniqueness and rename with care. The CLI/server validates on save and surfaces collisions.
+
+**Forecloses:** The "text first, ID last" author workflow from the research. Teams who prefer text-first can paste text into a note, rename with `alumic rename-line old.id new.id`, and accept the extra step.
+
+## Related
+
+- Specs: [Dialogue System](/reference/dialogue-system), [Authoring Dialogue](/guides/dialogue), [CLI](/guides/cli), [Validation](/guides/validation), [Testing](/guides/testing), [Debugging](/guides/debugging)
+- Findings resolved: audit-1 A4.

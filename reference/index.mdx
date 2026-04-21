@@ -1,0 +1,129 @@
+---
+title: "Reference"
+description: "Kernel primitives, data model, game systems, plugin API, editor internals."
+icon: "book-open"
+---
+
+Mechanism reference for every load-bearing surface of Alumic. Terse, precise, heavily cross-linked. If a page describes what something does, you're in the right place.
+
+## Architecture
+
+<CardGroup cols={3}>
+  <Card title="Architecture" icon="sitemap" href="/reference/architecture">
+    Five load-bearing primitives of the minimal kernel.
+  </Card>
+  <Card title="App lifecycle" icon="power-off" href="/reference/app-lifecycle">
+    Boot, build, run, dispose; scope transitions; identity.
+  </Card>
+  <Card title="Subsystem hierarchy" icon="layer-group" href="/reference/subsystem-hierarchy">
+    Four-scope tree — App, Session, Scene, Player.
+  </Card>
+</CardGroup>
+
+## Kernel primitives
+
+<CardGroup cols={2}>
+  <Card title="Event bus" icon="bolt-lightning" href="/reference/event-bus">
+    Typed Observable channels with hierarchical tag dispatch.
+  </Card>
+  <Card title="Scheduler" icon="clock" href="/reference/scheduler">
+    Three-phase tick: PreUpdate → Update → PostUpdate.
+  </Card>
+  <Card title="Tag registry" icon="tags" href="/reference/tag-registry">
+    Hierarchical dotted tags; matchers; redirectors.
+  </Card>
+  <Card title="Render kernel" icon="cube" href="/reference/render-kernel">
+    Three.js-native abstraction boundary.
+  </Card>
+</CardGroup>
+
+## Data model
+
+<CardGroup cols={2}>
+  <Card title="Entity graph" icon="share-nodes" href="/reference/entity-graph">
+    The connective tissue. Typed entities, references, backlinks.
+  </Card>
+  <Card title="Entity types and extractors" icon="table-columns" href="/reference/entity-types-and-extractors">
+    `defineEntityType`, the FieldType enum, reference extractors.
+  </Card>
+  <Card title="Entity database" icon="database" href="/reference/entity-database">
+    Query API, session-scoped cache, persistence, change events.
+  </Card>
+  <Card title="Data formats" icon="file-code" href="/reference/data-formats">
+    `.entity.json`, `.graph.json`, `.def.json`, `.strings.csv`, `.save.json`.
+  </Card>
+</CardGroup>
+
+## Game systems
+
+<CardGroup cols={3}>
+  <Card title="State machines" icon="arrows-rotate" href="/reference/state-machines">
+    `@alumic/state` (xstate) and `@alumic/flow` runtimes.
+  </Card>
+  <Card title="Dialogue system" icon="message" href="/reference/dialogue-system">
+    Timeline/event-driven dialogue runtime.
+  </Card>
+  <Card title="Ability system" icon="wand-magic-sparkles" href="/reference/ability-system">
+    Definition → Spec → Active pipeline; tag gating.
+  </Card>
+  <Card title="Asset management" icon="image" href="/reference/asset-management">
+    Content-addressed blobs, signed URLs, bundles.
+  </Card>
+  <Card title="Save system" icon="floppy-disk" href="/reference/save-system">
+    SPUD-style chunked serialization with schema versioning.
+  </Card>
+  <Card title="Input system" icon="gamepad" href="/reference/input-system">
+    Action/binding split; buttons, axes, axis2D.
+  </Card>
+  <Card title="Template system" icon="cubes" href="/reference/template-system">
+    `defineTemplate`, marketplace distribution, first-party templates.
+  </Card>
+</CardGroup>
+
+## Plugin API and transport
+
+<CardGroup cols={3}>
+  <Card title="Plugin system" icon="puzzle-piece" href="/reference/plugin-system">
+    AlumicPlugin interface, registry, dependency sort.
+  </Card>
+  <Card title="Entity API" icon="network-wired" href="/reference/entity-api">
+    HTTP surface: routes, headers, error envelope.
+  </Card>
+  <Card title="Sync protocol" icon="satellite-dish" href="/reference/sync-protocol">
+    Snapshot + event stream, cursor semantics.
+  </Card>
+</CardGroup>
+
+## Editor and shell
+
+<CardGroup cols={2}>
+  <Card title="Navigation and shell" icon="window-restore" href="/reference/navigation-shell">
+    Three-column layout: entity browser, viewport, inspector.
+  </Card>
+  <Card title="Undo and history" icon="clock-rotate-left" href="/reference/undo-history">
+    Per-entity undo stacks; revert via the version log.
+  </Card>
+  <Card title="Canvas and workspace" icon="square-dashed" href="/reference/canvas-and-workspace">
+    Infinite 2D spatial canvas; portal nodes.
+  </Card>
+  <Card title="UI integration" icon="browser" href="/reference/ui-integration">
+    SolidJS shell, Three.js canvas host, state bridging.
+  </Card>
+  <Card title="UI designer" icon="object-group" href="/reference/ui-designer">
+    Yoga-based layout, WYSIWYG authoring, vector integration.
+  </Card>
+</CardGroup>
+
+## Teams and agents
+
+<CardGroup cols={3}>
+  <Card title="Permissions" icon="user-shield" href="/reference/permissions">
+    Workspace/project/user hierarchy; role matrix.
+  </Card>
+  <Card title="Project management" icon="clipboard-list" href="/reference/project-management">
+    Issues, boards, milestones, comments — all entities.
+  </Card>
+  <Card title="Actors and agents" icon="robot" href="/reference/actors-and-agents">
+    Users and agents as peer authoring identities.
+  </Card>
+</CardGroup>

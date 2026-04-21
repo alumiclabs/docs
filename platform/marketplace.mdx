@@ -1,0 +1,62 @@
+---
+title: "Marketplace"
+description: "Template and plugin distribution; publish pipeline; install flow."
+icon: "store"
+---
+
+{/* The marketplace spec is spread across several ADRs and spec sections; this page stitches them until a dedicated marketplace spec chapter lands. */}
+
+<Info>
+**Decisions shaping this page:** [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing), [ADR-037 Plugin-defined schemas, extractors, and migrations ship as publish artifacts](/decisions/037-plugin-schema-registration), [ADR-039 Templates ship seed content under data/entities/ + data/assets/](/decisions/039-template-seed-format), [ADR-045 Cross-workspace import requires target-side plugin presence](/decisions/045-cross-workspace-import), [ADR-046 Plugin networkAllowlist is enforced via CSP on a per-plugin subdomain](/decisions/046-plugin-sandbox-csp), [ADR-048 Template install seeds entities and rewrites refs server-side](/decisions/048-template-install-seed)
+</Info>
+
+The Alumic marketplace is a Phase-4 deliverable. It is the unified distribution surface for both templates and plugins; on-prem deployments can mirror the hosted registry or point at a self-hosted one.
+
+## Publishing
+
+Templates and plugins are published through `alumic publish`. The server-side pipeline:
+
+<Steps>
+  <Step title="Validate">
+    Zod-checks every entity in the `data/` seed. Refuses if any asset reference doesn't resolve against `data/assets/manifest.json`, or if any declared entity type uses features outside the portable op-code set (see [ADR-037](/decisions/037-plugin-schema-registration)).
+  </Step>
+  <Step title="Transpile">
+    Produces engine artifacts for every declared target (C# for Unity, C++ for Unreal, GDExtension for Godot) per [ADR-033](/decisions/033-engine-transpile-server-side). The engine plugin never runs a compiler.
+  </Step>
+  <Step title="Sign">
+    The Alumic-managed signing key signs the bundle per [ADR-034](/decisions/034-marketplace-sandbox-signing). Third-party authors do not hold signing keys in Phase 4.
+  </Step>
+  <Step title="Index">
+    Schema descriptors, reference extractors, and migrations (`registrations.json` — [ADR-037](/decisions/037-plugin-schema-registration)) are ingested into the workspace's entity-type registry on install.
+  </Step>
+</Steps>
+
+## Installing
+
+A SaaS user clicks **New project** in the web UI or runs `alumic create <name> --template <id>` from the CLI; both paths funnel through the same server-side install routine described in [ADR-048](/decisions/048-template-install-seed):
+
+1. Mint project UUID.
+2. Upload asset blobs to object storage; mint fresh asset IDs in the target project.
+3. Clone seed entities; rewrite every ref using the `bundle_asset_id → target_asset_id` and `bundle_entity_id → target_entity_id` maps.
+4. Run the reference extractor on each cloned entity (same path as any write).
+5. Commit or roll back atomically.
+
+Cross-workspace imports are guarded by a schema-presence pre-flight ([ADR-045](/decisions/045-cross-workspace-import)) — the target workspace must have every required plugin installed.
+
+## Sandbox
+
+Third-party plugins run in a Web Worker sandbox with a per-plugin CSP header limiting outbound `fetch` to the declared `networkAllowlist` ([ADR-046](/decisions/046-plugin-sandbox-csp)). First-party plugins run in the main realm with full `ctx`.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Template system" icon="cubes" href="/reference/template-system">
+    `defineTemplate()` and how templates compose plugins.
+  </Card>
+  <Card title="Engine plugin" icon="gamepad-modern" href="/platform/engine-plugin">
+    Which artifacts the engine side consumes.
+  </Card>
+  <Card title="Design constraints" icon="gauge" href="/platform/design-constraints">
+    Rate limits and quotas on publish and install.
+  </Card>
+</CardGroup>

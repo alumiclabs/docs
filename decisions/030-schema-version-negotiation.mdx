@@ -1,0 +1,70 @@
+---
+title: "ADR-030: Schema and protocol version negotiation"
+description: "Three contracts:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation) makes the backend the schema owner; [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api) lets plugins register entity types at runtime; [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4) makes the marketplace ship new entity types. This guarantees clients and backends will run mismatched schemas in production — a v1 browser against a v2 backend that added a required field, a v1 engine plugin that doesn't know a v3 entity type.
+
+Save-file migration (spec 15) is detailed; entity-schema migration is not.
+
+## Decision
+
+Three contracts:
+
+### 1. Schema discovery
+
+`GET /api/schema` returns all registered entity types in the caller's workspace:
+
+```json
+{
+  "schemaVersion": "2026-04-20.3",
+  "entityTypes": {
+    "Character": { "schemaHash": "sha256-...", "revision": 2, "descriptor": { /* JSON Schema */ } },
+    "Dialogue":  { "schemaHash": "sha256-...", "revision": 5, "descriptor": { /* JSON Schema */ } },
+    "CraftingRecipe": { "schemaHash": "sha256-...", "revision": 1, "provider": "plugin:survival-bundle@0.3.1" }
+  }
+}
+```
+
+Clients cache by `schemaVersion` and refresh on mismatch.
+
+### 2. Version headers
+
+Every request sends `X-Alumic-Protocol: 1`, `X-Alumic-Schema-Version: <cached-version>`. The backend responds with `X-Alumic-Schema-Version: <current>`; if the values differ, the client re-fetches `/api/schema`.
+
+### 3. Migration responsibility
+
+Migrations run **server-side, on-read for clients that need them**. The backend stores entities at the latest schema revision; when a client announces an older `X-Alumic-Schema-Version`, the backend downgrades the response (drops unknown-to-client fields, substitutes sensible defaults for removed-required fields) and marks the response `X-Alumic-Schema-Downgraded: true`. Unknown entity types are omitted; the client sees `{ unknownTypes: [...] }` in list responses.
+
+Entity-type schema bumps follow a `major.minor` discipline:
+- **Minor (additive, optional field):** older clients ignore the field; writes from older clients preserve the field server-side.
+- **Major (required field added, field removed, type changed):** requires a migration registered with the backend. The backend keeps the old shape readable via downgrade for one major release window; after that, older clients get `409 Protocol Outdated`.
+
+## Consequences
+
+**Enables:** Rolling deployments and mixed-version client fleets. The marketplace can ship plugins that extend the schema; old clients degrade gracefully by ignoring new types.
+
+**Obligates:** Plugin authors declare schema migrations alongside schema changes. The backend hosts every past schema revision in a migration table; major bumps require migration code.
+
+**Forecloses:** Ad-hoc schema changes without a revision bump. Zod schema edits in a plugin must increment the entity type's revision or the backend rejects registration.
+
+### Client behavior on downgraded responses
+
+A response with `X-Alumic-Schema-Downgraded: true` is **read-only by default**. Writing a downgraded entity back via PATCH would drop fields the client never saw, which the backend would treat as intentional removal. Clients therefore:
+
+- **Browser editor:** disables the save affordance for downgraded entities, shows a banner ("A newer version of this entity type is installed; reload to edit"), and offers a `Refresh schema` button that re-fetches `/api/schema`. Forced writes require an `X-Alumic-Schema-Acknowledge-Dropped: true` header, which the editor never sets without a user-visible confirmation; the server records the forced downgrade in the audit log ([entity-api](/reference/entity-api) `audit_events`).
+- **Engine plugin:** treats downgraded entities as readable but refuses to return them from push-back commands (`alumic push --from-engine`). The plugin logs a `schema.downgraded` warning on the first downgraded read per session.
+- **CLI:** `alumic pull` writes downgraded entities to the local mirror with a `.downgraded` sidecar marker; `alumic push` refuses to upload any entity carrying that marker unless `--acknowledge-dropped` is passed.
+
+This keeps the downgrade transparent (clients stay functional) without silent data loss (writes require explicit acknowledgement).
+
+## Related
+
+- Specs: [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [Plugin System](/reference/plugin-system), [Writing a Plugin](/guides/writing-a-plugin), [Save System](/reference/save-system)
+- Depends on: [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4).
+- Informs: [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side).

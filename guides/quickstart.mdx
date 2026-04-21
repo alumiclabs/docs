@@ -1,0 +1,51 @@
+---
+title: "Quickstart"
+description: "Scaffold a project from a template and run it locally."
+icon: "rocket"
+---
+
+A two-minute path from nothing to a running template. Assumes Bun is installed.
+
+<Steps>
+  <Step title="Install the Alumic CLI">
+    ```bash
+    bun add -g @alumic/cli
+    ```
+  </Step>
+  <Step title="Log in">
+    ```bash
+    alumic login
+    ```
+    Opens a device-flow login in your browser. The CLI caches a PAT under `~/.alumic/credentials` for subsequent commands. See [Authentication](/platform/authentication) and [ADR-026 Engine-plugin authentication](/decisions/026-engine-plugin-auth) for the credential model.
+  </Step>
+  <Step title="Create a project from a template">
+    ```bash
+    alumic create my-game --template topdown-action
+    cd my-game
+    ```
+    Mints a server-issued project UUID ([ADR-025](/decisions/025-project-identity-server-uuid)), fetches the template bundle, and writes a local working directory stamped with `project.json`. The server is the source of truth; the local directory is a mirror for Git workflows and offline authoring.
+  </Step>
+  <Step title="Start the dev server">
+    ```bash
+    bun dev
+    ```
+    Runs Vite with SolidJS HMR for template-author iteration. See [CLI](/guides/cli) for the full command reference.
+  </Step>
+</Steps>
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Project structure" icon="folder-tree" href="/guides/project-structure">
+    What lives where in the monorepo.
+  </Card>
+  <Card title="Authoring entities" icon="pen" href="/guides/authoring-entities">
+    The unit of authored content.
+  </Card>
+  <Card title="Writing a plugin" icon="plug" href="/guides/writing-a-plugin">
+    Extend the framework with your own systems.
+  </Card>
+  <Card title="Three-layer data model" icon="layer-group" href="/concepts/three-layer-model">
+    Why authored content, editor metadata, and runtime state stay separate.
+  </Card>
+</CardGroup>

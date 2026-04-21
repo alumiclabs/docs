@@ -1,0 +1,446 @@
+---
+title: "Project Structure"
+description: "Monorepo layout: packages, templates, tools, engines."
+icon: "folder-tree"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware), [ADR-005 Bun workspaces as the monorepo tool](/decisions/005-bun-workspaces), [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-039 Templates ship seed content under data/entities/ + data/assets/](/decisions/039-template-seed-format)
+</Info>
+
+> **Three disjoint "projects" — don't conflate them.** This chapter documents
+> the **Alumic monorepo** layout used by framework developers. It is not the
+> layout of a template-author's package, and it is not the layout of an
+> end-user game project:
+>
+> - **(a) Alumic monorepo** (this chapter) — the repo Alumic itself is built
+>   in. Contains `@alumic/*` packages, first-party templates, and CLI tooling.
+> - **(b) Template package** ([Template System](/reference/template-system)) — a Bun workspace package authored by a
+>   template author and published to the marketplace ([ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4)). Seed entities
+>   ship inside it; the publish pipeline ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side)) ingests them into the
+>   backend at install time.
+> - **(c) End-user game project** ([ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)) — a server-side row with
+>   a server-issued UUID, owned by a workspace. Under SaaS-first it has
+>   **no local `data/` tree** by default; `alumic pull` / `alumic export`
+>   writes an optional working copy for Git workflows and offline authoring.
+>
+> Sections below describe (a). See [Template System](/reference/template-system) for (b) and [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid)/[ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware) for (c).
+
+## Monorepo Layout
+
+Alumic uses a **Bun workspace monorepo**. All packages, templates, and tooling live in a single repository with shared build configuration.
+
+**Why Bun over pnpm + Turborepo** (which the research recommended): Alumic's desktop distribution runs on [Electrobun](https://electrobun.dev), a lightweight native shell (~6 MB) driven by a Bun runtime. Keeping Bun as the runtime from dev through desktop packaging means a single toolchain instead of layering Bun on top of a pnpm/Turborepo setup. Bun workspaces provide native TypeScript execution, a built-in test runner, and `workspace:*` semantics equivalent to pnpm's. If incremental-build caching becomes painful, external caching (Nx Cloud or content-addressable build outputs) can be added without reintroducing Turborepo. See [ADR-005 Bun workspaces as the monorepo tool](/decisions/005-bun-workspaces).
+
+```
+alumic/                              # Root — Bun workspace
+├── bun.lock
+├── bunfig.toml                      # Bun configuration
+├── package.json                     # Root: workspaces, shared scripts, devDependencies
+├── tsconfig.base.json               # Shared TypeScript compiler options
+├── tsconfig.json                    # Project references to all packages
+├── vitest.config.ts                 # Root vitest configuration
+├── .gitignore
+├── .eslintrc.cjs                    # Shared ESLint config
+├── CLAUDE.md                        # AI assistant context
+│
+├── packages/
+│   ├── core/                        # @alumic/core — the kernel
+│   │   ├── package.json
+│   │   ├── tsconfig.json
+│   │   ├── src/
+│   │   │   ├── index.ts             # Public barrel export
+│   │   │   ├── app.ts               # App class
+│   │   │   ├── plugin.ts            # AlumicPlugin, PluginRegistry
+│   │   │   ├── subsystem.ts         # defineSubsystem, SubsystemHandle
+│   │   │   ├── channel.ts           # defineChannel, Observable, EventBus
+│   │   │   ├── scheduler.ts         # Scheduler, Phase, defineSystem
+│   │   │   └── types.ts             # Shared kernel types
+│   │   └── __tests__/
+│   │       ├── app.test.ts
+│   │       ├── plugin.test.ts
+│   │       ├── subsystem.test.ts
+│   │       ├── channel.test.ts
+│   │       └── scheduler.test.ts
+│   │
+│   ├── tags/                        # @alumic/tags — hierarchical tag registry
+│   │   ├── package.json
+│   │   ├── tsconfig.json
+│   │   ├── src/
+│   │   │   ├── index.ts
+│   │   │   ├── tag.ts               # defineTag, matchesTag, parentTag, ancestors
+│   │   │   └── registry.ts          # TagRegistry, redirectors
+│   │   └── __tests__/
+│   │       ├── tag.test.ts
+│   │       └── registry.test.ts
+│   │
+│   ├── render/                      # @alumic/render — RenderKernel interface (types only)
+│   │   ├── package.json
+│   │   ├── tsconfig.json
+│   │   └── src/
+│   │       ├── index.ts
+│   │       ├── kernel.ts            # RenderKernel interface
+│   │       └── types.ts             # FrameInfo, RenderTarget, etc.
+│   │
+│   ├── render-three/                # @alumic/render-three — Three.js WebGL backend
+│   │   ├── package.json
+│   │   ├── tsconfig.json
+│   │   ├── src/
+│   │   │   ├── index.ts
+│   │   │   ├── three-kernel.ts      # ThreeRenderKernel implements RenderKernel
+│   │   │   └── plugin.ts            # threeWebGL() plugin factory
+│   │   └── __tests__/
+│   │       └── three-kernel.test.ts
+│   │
+│   ├── input/                       # @alumic/input — input action manager
+│   ├── state/                       # @alumic/state — hierarchical state machines
+│   ├── assets/                      # @alumic/assets — asset definitions and loading
+│   ├── save/                        # @alumic/save — serialization system
+│   ├── dialogue/                    # @alumic/dialogue — dialogue runtime
+│   ├── flow/                        # @alumic/flow — node-graph runtime
+│   ├── ability/                     # @alumic/ability — GAS-shaped ability system
+│   ├── ecs/                         # @alumic/ecs — backend-agnostic ECS interface
+│   ├── ecs-koota/                   # @alumic/ecs-koota — koota ECS backend
+│   ├── multiplayer/                 # @alumic/multiplayer — networking
+│   ├── templates-core/              # @alumic/templates-core — defineTemplate, template host
+│   ├── backend/                     # @alumic/backend — Fastify + Postgres entity API ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), Phase 2)
+│   ├── engine-bridge/               # @alumic/engine-bridge — shared TS core for engine plugins ([Engine Plugin](/platform/engine-plugin), Phase 4)
+│   ├── transpile-csharp/            # @alumic/transpile-csharp — engine-portable C# codegen ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), Phase 4)
+│   ├── transpile-cpp/               # @alumic/transpile-cpp — Unreal C++ codegen ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), Phase 4)
+│   └── transpile-gdextension/       # @alumic/transpile-gdextension — Godot codegen ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), Phase 4)
+│
+├── engines/                         # Per-engine plugin distributions (Phase 4)
+│   ├── alumic-unity/                # Unity Asset Store package; wraps @alumic/engine-bridge ([Engine Plugin](/platform/engine-plugin))
+│   ├── alumic-unreal/               # Unreal Marketplace plugin
+│   └── alumic-godot/                # Godot Asset Library addon
+│
+├── templates/
+│   ├── topdown-action/              # @alumic/template-topdown-action
+│   │   ├── package.json
+│   │   ├── tsconfig.json
+│   │   ├── index.html               # SolidJS entry HTML
+│   │   ├── src/
+│   │   │   ├── index.tsx            # SolidJS app mount
+│   │   │   ├── App.tsx              # SolidJS shell with <Canvas>
+│   │   │   ├── template.ts          # defineTemplate() manifest
+│   │   │   ├── systems/             # Game-specific systems
+│   │   │   └── scenes/              # Scene definitions
+│   │   └── data/                    # Seed content — [ADR-039 Templates ship seed content under data/entities/ + data/assets/](/decisions/039-template-seed-format) format
+│   │       ├── entities/            # .entity.json rows ([Entity Graph](/reference/entity-graph))
+│   │       ├── strings/             # .strings.csv files
+│   │       └── assets/              # manifest.json + content-addressed blobs ([Asset Management](/reference/asset-management))
+│   │
+│   ├── tactics/
+│   ├── narrative/
+│   └── survival/
+│
+└── tools/
+    └── cli/                         # @alumic/cli — SaaS-aware CLI ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware), Phase 2)
+```
+
+## Bun Workspace Configuration
+
+### Root `package.json`
+
+```json
+{
+  "name": "alumic",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "templates/*",
+    "tools/*",
+    "engines/*"
+  ],
+  "scripts": {
+    "build": "bun run --filter '*' build",
+    "test": "bun test",
+    "typecheck": "tsc -b",
+    "lint": "eslint packages/ templates/",
+    "clean": "bun run --filter '*' clean"
+  },
+  "devDependencies": {
+    "typescript": "^5.7",
+    "vitest": "^3.1",
+    "eslint": "^9.0",
+    "@typescript-eslint/eslint-plugin": "^8.0",
+    "@typescript-eslint/parser": "^8.0"
+  }
+}
+```
+
+### `bunfig.toml`
+
+```toml
+[install]
+peer = false
+
+[test]
+preload = ["./vitest.config.ts"]
+```
+
+## TypeScript Configuration
+
+### `tsconfig.base.json` (shared across all packages)
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false
+  }
+}
+```
+
+### Per-Package `tsconfig.json` (example: @alumic/core)
+
+```json
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "tsBuildInfoFile": "./dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../tags" }
+  ]
+}
+```
+
+### Root `tsconfig.json` (project references)
+
+The reference list grows as packages land. Phase 1 only lists the kernel + first-template slice; Phase 2 adds backend, assets, save, state, ecs; Phase 3 adds dialogue, flow, ability, multiplayer; Phase 4 adds engine-bridge and the transpilers.
+
+```json
+{
+  "files": [],
+  "references": [
+    // Phase 1 — kernel + first template
+    { "path": "packages/tags" },
+    { "path": "packages/core" },
+    { "path": "packages/render" },
+    { "path": "packages/render-three" },
+    { "path": "packages/input" },
+    { "path": "packages/templates-core" },
+
+    // Phase 2 — backend + content systems
+    { "path": "packages/backend" },
+    { "path": "packages/assets" },
+    { "path": "packages/save" },
+    { "path": "packages/state" },
+    { "path": "packages/ecs" },
+
+    // Phase 3 — gameplay + authoring
+    { "path": "packages/dialogue" },
+    { "path": "packages/flow" },
+    { "path": "packages/ability" },
+    { "path": "packages/multiplayer" },
+
+    // Phase 4 — engine seam + transpile
+    { "path": "packages/engine-bridge" },
+    { "path": "packages/transpile-csharp" },
+    { "path": "packages/transpile-cpp" },
+    { "path": "packages/transpile-gdextension" }
+  ]
+}
+```
+
+## Per-Package Conventions
+
+### `package.json` (example: @alumic/core)
+
+```json
+{
+  "name": "@alumic/core",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@alumic/tags": "workspace:*"
+  },
+  "peerDependencies": {},
+  "devDependencies": {
+    "typescript": "^5.7"
+  }
+}
+```
+
+**Key conventions:**
+- `"type": "module"` — ESM only, no CommonJS
+- `"main"` and `"exports"` point to **source** (`./src/index.ts`) during development, enabling direct TS imports via Bun's native TypeScript support
+- For publishing to npm (future), a build step will produce `./dist` with compiled JS + `.d.ts` declarations, and `exports` will be updated to point there
+- `workspace:*` protocol for inter-package dependencies
+- No bundler needed during development — Bun resolves TypeScript imports natively
+
+### Directory Layout Within a Package
+
+```
+packages/example/
+├── package.json
+├── tsconfig.json
+├── src/
+│   ├── index.ts          # Public barrel — re-exports public API only
+│   ├── feature-a.ts      # One file per concept/type
+│   ├── feature-b.ts
+│   └── internal/          # Private modules (not re-exported)
+│       └── helpers.ts
+└── __tests__/
+    ├── feature-a.test.ts
+    └── feature-b.test.ts
+```
+
+**Rules:**
+- One concept per file (e.g., `plugin.ts` defines `AlumicPlugin` + `PluginRegistry`)
+- `index.ts` is a barrel that re-exports only the public API — internal helpers stay private
+- Tests live in `__tests__/` adjacent to `src/`, not co-located with source
+- No `src/internal/` exports in `index.ts`
+
+## Build Pipeline
+
+### Development (Bun native)
+
+During development, no build step is needed. Bun natively resolves TypeScript imports, including cross-workspace references via `workspace:*`. Running `bun run src/index.ts` in any package "just works."
+
+For templates, `bun --hot` or Vite dev server provides hot reload.
+
+### Type Checking
+
+```bash
+# Check all packages via project references
+bun run typecheck    # → tsc -b
+
+# Check a single package
+cd packages/core && tsc --noEmit
+```
+
+### Testing
+
+```bash
+# Run all tests from root
+bun test
+
+# Run tests for a specific package
+bun test packages/core
+
+# Watch mode
+bun test --watch
+```
+
+Vitest is configured at the root for consistent test behavior across packages. Bun's built-in test runner (`bun test`) is also supported for simpler cases.
+
+### Production Build (Future)
+
+When packages need to be published to npm or bundled for production deployment:
+
+1. `tsc -b` compiles TypeScript to JavaScript with declarations
+2. Output goes to `./dist` per package
+3. `package.json` exports are updated to point to `./dist`
+4. Tree-shaking is handled by the consumer's bundler (Vite, esbuild, etc.)
+
+For templates, Vite or Bun's built-in bundler produces optimized static assets.
+
+## Dependency Management
+
+### Internal Dependencies
+
+Packages reference each other using Bun's workspace protocol:
+
+```json
+{
+  "dependencies": {
+    "@alumic/core": "workspace:*",
+    "@alumic/tags": "workspace:*"
+  }
+}
+```
+
+The `workspace:*` specifier resolves to the local workspace package during development. When published, it resolves to the actual version number.
+
+### External Dependencies
+
+- **Three.js**: Declared as a `peerDependency` in `@alumic/render-three` with a version range (e.g., `"three": ">=0.170.0"`). The monorepo root pins a specific version.
+- **SolidJS**: Declared as a dependency in template packages and any UI-related packages.
+- **Zod**: Declared as a dependency in packages that define schemas (`@alumic/core`, `@alumic/dialogue`, etc.).
+
+### Avoiding Dependency Bloat
+
+- `@alumic/tags` has zero external dependencies
+- `@alumic/core` depends only on `@alumic/tags` and `zod`
+- `@alumic/render` is types-only — zero runtime dependencies
+- Feature plugins declare the minimum necessary dependencies
+- Three.js is never imported by `@alumic/core` — only by `@alumic/render-three`
+
+## File Naming Conventions
+
+| Type | Convention | Example |
+|------|-----------|---------|
+| Source files | `kebab-case.ts` | `three-kernel.ts` |
+| Test files | `kebab-case.test.ts` | `three-kernel.test.ts` |
+| SolidJS components | `PascalCase.tsx` | `Canvas.tsx`, `App.tsx` |
+| Data files | `kebab-case.{format}.json` | `intro.graph.json`, `sword.def.json` |
+| Config files | Standard names | `package.json`, `tsconfig.json` |
+
+## Project Identity
+
+A user-created project is not a directory — it is a server-issued UUID ([ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid)). When a file-shaped workspace exists on disk (on-prem seed, on-prem export, CLI `--offline`), its root carries `project.json`:
+
+```json
+{
+  "$format": "alumic-project",
+  "$version": 1,
+  "id": "0b7e5f1c-3e8a-4a3a-9a5e-1f9b7c4b8d21",
+  "name": "Forest Game",
+  "workspaceId": "01HR0K...",
+  "createdAt": "2026-04-20T12:00:00.000Z"
+}
+```
+
+CLI commands (`alumic push`, `alumic pull`, `alumic export`) resolve the project by reading this file. Directories without `project.json` are anonymous until pushed, at which point a UUID is minted and the file is stamped.
+
+## Environment Variables
+
+Template dev servers and the backend use `.env` files for deployment-specific configuration (backend URL for the browser, database URL for the backend). These are never committed.
+
+```
+# templates/topdown-action/.env.local (gitignored)
+VITE_ALUMIC_BACKEND=http://localhost:3000
+
+# packages/backend/.env.local (gitignored)
+ALUMIC_DEPLOYMENT=desktop          # saas | onprem | desktop
+DATABASE_URL=postgres://localhost:5432/alumic
+OBJECT_STORAGE_ENDPOINT=http://localhost:9000
+JWT_SIGNING_KEY=...
+```

@@ -1,0 +1,67 @@
+---
+title: "ADR-034: Marketplace bundles are signed; third-party plugins execute in a worker sandbox"
+description: "Marketplace bundles are signed; third-party plugins execute in a worker sandbox"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4) opens a marketplace where third-party plugins and templates are installed into any user's project. [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api)'s `ctx` surface gives plugins full entity-DB access. Without sandboxing and signing, a malicious plugin can exfiltrate entities across projects, read the active session JWT, or phish through overlaid DOM.
+
+## Decision
+
+### Publish signing
+
+Marketplace publish flow signs the bundle with an Alumic-managed signing key:
+
+```
+PublishArtifact {
+  pluginId, version, sha256, signature, signedBy, signedAt
+}
+```
+
+The backend verifies signatures on install. On-prem registries carry their own signing keys; a workspace can require "only first-party-signed" via a policy flag.
+
+Third-party authors do **not** hold signing keys in Phase 4. Phase 5+ may introduce author-held keys with a web-of-trust or allowlist model.
+
+### Sandbox
+
+First-party plugins (bundled with Alumic, signed by Alumic's root key) run in the main realm with full `ctx`.
+
+Third-party plugins run in a **Web Worker sandbox**:
+- No direct DOM access.
+- `ctx` is marshaled through a `postMessage` RPC proxy. The proxy enforces scope: the plugin sees only its declared entity types, and only within the current project.
+- Asset access goes through signed-URL requests issued to the plugin by the host ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)).
+- No `fetch` to arbitrary origins; a declared `networkAllowlist` in plugin meta gates outbound requests.
+- Editor surfaces ([ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api)) render in a sandboxed `<iframe>` with a restricted `postMessage` bridge.
+
+### Declared permissions
+
+Plugin `meta` gains a `permissions` field:
+
+```ts
+permissions: {
+  entityTypes: string[];            // which types the plugin may touch
+  readBacklinks?: boolean;
+  networkAllowlist?: string[];      // outbound domain allowlist
+  assetUpload?: boolean;
+}
+```
+
+The install flow shows the user the requested permissions before install. Permission upgrades on update require re-consent.
+
+## Consequences
+
+**Enables:** A marketplace that can accept third-party submissions without trusting them. Per-plugin blast radius is bounded. On-prem deployments can tighten or relax the policy via config.
+
+**Obligates:** The `ctx` facade must have a Worker-RPC variant by Phase 4. Editor-surface registration ([ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api)) gains an iframe-wrapping contract. Publish pipeline runs automated scans (malicious-pattern, permission-escalation heuristics) before signing.
+
+**Forecloses:** Loading plugins via raw `<script>` from arbitrary URLs. Marketplace is the entry point; signed bundles are the currency.
+
+## Related
+
+- Specs: [Plugin System](/reference/plugin-system), [Writing a Plugin](/guides/writing-a-plugin), [Template System](/reference/template-system), [Navigation and Shell](/reference/navigation-shell), [Undo and History](/reference/undo-history)
+- Depends on: [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4).
+- Informs: Phase 4 security scope.

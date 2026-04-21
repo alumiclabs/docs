@@ -1,0 +1,187 @@
+---
+title: "Permissions and Sharing"
+description: "Workspace/project/user hierarchy; owner/editor/viewer roles."
+icon: "user-shield"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth), [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals), [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model)
+</Info>
+
+## Overview
+
+Alumic's permission model is a three-level role system scoped to workspaces, with token scopes for non-browser clients. Phase 2 ships single-user + workspace ownership; Phase 3 opens team invitations and per-project roles; Phase 4+ layers on SSO/SAML and optional audit logging for enterprise ([ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing)).
+
+This chapter specifies:
+
+- The workspace / project / user model.
+- The `owner | editor | viewer` role matrix.
+- How roles map to Entity API operations.
+- How PAT scopes compose with roles.
+- The `403` error envelope.
+
+## The Identity Hierarchy
+
+```
+Workspace       ◄─ billing tenant, team container
+ ├── Members    ◄─ users with a workspace role
+ └── Projects   ◄─ authoring containers
+     ├── Members (optional per-project role override)
+     └── Entities
+```
+
+- **User** — one person. Has credentials ([ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing)) and issues PATs ([ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)).
+- **Workspace** — a billing tenant. Holds members, projects, plan, quotas. A user belongs to zero or more workspaces.
+- **Project** — an authoring container scoped to exactly one workspace. Identity is a UUID ([ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid)). Holds entities, assets, saves.
+
+In Phase 2, every user gets a personal workspace automatically; multi-user workspaces arrive in Phase 3.
+
+## Roles
+
+Three roles, per workspace and optionally per project:
+
+| Role | Workspace-level | Project-level override |
+|---|---|---|
+| `owner` | Manage members, billing, delete workspace, all project rights | Same as workspace owner within the project |
+| `editor` | Create/archive projects; read/write all entities in every project | Read/write entities in the specific project |
+| `viewer` | Read all projects; no writes | Read-only in the specific project |
+
+Workspace-level role is the default. A project-level role **overrides** it for that project (upgrade or downgrade — e.g., a workspace `editor` can be a project `viewer` on a locked project).
+
+### Role matrix for Entity API operations
+
+| Operation | Required role |
+|---|---|
+| `GET /api/projects/:pid/entities` | `viewer` |
+| `GET /api/projects/:pid/entities/:id` | `viewer` |
+| `POST /api/projects/:pid/entities` | `editor` |
+| `PATCH /api/projects/:pid/entities/:id` | `editor` |
+| `DELETE /api/projects/:pid/entities/:id` | `editor` |
+| `POST /api/projects/:pid/entities/:id/revert` | `editor` |
+| `POST /api/projects/:pid/assets` (upload) | `editor` |
+| `GET /api/projects/:pid/assets/:id` | `viewer` |
+| `POST /api/workspaces/:id/projects` (create project) | workspace `editor` |
+| `DELETE /api/projects/:pid` (archive) | workspace `owner` |
+| `POST /api/workspaces/:id/members` (invite) | workspace `owner` |
+| `DELETE /api/workspaces/:id/members/:uid` | workspace `owner` |
+| `POST /api/marketplace/install` | workspace `editor` |
+| `POST /api/marketplace/publish` | workspace `owner` |
+| `POST /api/pats` (mint PAT for self) | any role |
+| `POST /api/projects/:pid/entities/:id/comments` (comment on any entity) | any role (including `viewer`) |
+| `POST /api/projects/:pid/entities` (Issue, Sprint, Milestone, Board) | `editor` |
+| `PATCH /api/projects/:pid/entities/:id` (Issue kind/status/assignee) | `editor`; a `viewer` may update `status` only on Issues they're assigned to |
+| `POST /api/projects/:pid/entities/:id/proposals` | `project:propose` scope ([ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)) |
+| `POST /api/projects/:pid/proposals/:id/review` | `editor` by default; policy may restrict further |
+| `POST /api/workspaces/:wid/agents` (create Agent) | workspace `owner` |
+| `DELETE /api/workspaces/:wid/agents/:id` (revoke Agent) | workspace `owner` |
+| `POST /api/projects/:pid/agent-runs/:id/revert` | `editor` |
+| Configure approval policy on a project / entity type / entity | `owner` |
+| Configure workspace-level Issue-kind enum | workspace `owner` |
+
+### Actor model and effective role ([ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model))
+
+Every request resolves to an **Actor** (User or Agent). An Agent inherits its owner User's workspace role at request time; revoking the owner's membership immediately invalidates all of the agent's credentials on that workspace. An agent may be **further narrowed** by its declared scopes (spec/28) but never broader than its owner's current role.
+
+The `agent-owner` relationship is recorded as `agents.owner_user_id`. The owner is accountable for the agent's writes (written into `entity_versions.on_behalf_of_user_id`) but the agent's own role does not propagate back — the owner keeps their human role unchanged by the agent's actions.
+
+## PAT Scope Composition
+
+PAT scopes ([ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)) **narrow** the effective permission set — they never expand past the issuing user's current role.
+
+```
+effective_permissions = intersect(
+  user_role_permissions_at_request_time,
+  pat_scope_allowlist
+)
+```
+
+Scope set:
+
+- `project:read` — maps to `viewer` on the token's workspace (or specified projects).
+- `project:write` — maps to `editor`. Direct commits; subject to approval policy ([ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)).
+- `project:propose` — submit proposals only; cannot directly commit ([ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)). Default for agent credentials.
+- `asset:read` — read-only asset API; useful for CI that only serves cached builds.
+- `asset:upload` — write to the asset API.
+- `issue:create` — create Issues, Comments, Boards, Sprints, Milestones without full `project:write`. Scoped for agents that track work but don't mutate content.
+- `issue:comment` — comment on any entity. Narrowest scope for agents that only annotate.
+
+A PAT with `project:write` issued by a user who is currently only a `viewer` evaluates as `viewer`. The user's effective role is re-evaluated per request — revoking the user's workspace membership immediately kills the PAT's reach without explicit revocation. The same rule applies to an Agent's credential: an agent whose owner User is downgraded to `viewer` loses write scope instantly.
+
+## Sharing: Invitations (Phase 3)
+
+```
+POST /api/workspaces/:id/invitations
+{ "email": "alice@example.com", "role": "editor" }
+→ { "invitationId": "...", "acceptUrl": "https://alumic.app/invite/<token>" }
+```
+
+Invitation tokens are single-use, 7-day TTL. Accepting attaches the user to the workspace with the offered role. Existing users can decline with `DELETE /invitations/:id`.
+
+Per-project membership is layered on:
+
+```
+POST /api/projects/:pid/members
+{ "userId": "...", "role": "viewer" }
+```
+
+## SSO / SAML (Phase 4+, on-prem and enterprise tier)
+
+SSO does not change the role model — it changes the identity provider. Workspaces in SSO mode:
+
+- Pin a domain and require all members to sign in via the configured IdP.
+- Auto-provision members on first login with a configurable default role (`viewer` by default).
+- Optionally disable password-based login for the domain.
+
+SAML 2.0 + SCIM 2.0 for provisioning. Details in a Phase-4 spec chapter when the tier lights up.
+
+## 403 Error Envelope
+
+Every permission failure returns:
+
+```http
+HTTP/1.1 403 Forbidden
+Content-Type: application/json
+
+{
+  "error": "forbidden",
+  "message": "Editor role is required for this operation.",
+  "details": {
+    "requiredRole": "editor",
+    "currentRole": "viewer",
+    "workspaceId": "01HR...",
+    "projectId": "0b7e...",   // absent for workspace-scoped ops
+    "scopeShortfall": ["project:write"]  // if the PAT scope is the limiter
+  }
+}
+```
+
+- `scopeShortfall` lists the scopes the current token lacks; empty when the user's role itself is insufficient.
+- UI clients render a contextual message ("You are a viewer — ask the project owner to upgrade you") rather than a raw 403.
+
+## Audit Logging (optional)
+
+A config flag enables append-only audit logging for permission-relevant events: invitation, role change, project archive/restore, PAT create/revoke, SSO config change. Entries live in a separate Postgres table and are never mutated. Enterprise on-prem tier is the first consumer; hosted SaaS exposes audit logs on paid tiers.
+
+```sql
+CREATE TABLE audit_log (
+  id            BIGSERIAL PRIMARY KEY,
+  workspace_id  UUID NOT NULL,
+  actor_user_id UUID,                    -- null for system events
+  kind          TEXT NOT NULL,           -- 'invite.created', 'role.changed', ...
+  target        JSONB NOT NULL,          -- kind-specific
+  occurred_at   TIMESTAMPTZ DEFAULT now()
+);
+```
+
+## Phasing
+
+| Feature | Phase |
+|---|---|
+| Single-user + personal workspace + project ownership | 2 |
+| Role enforcement on Entity API | 2 |
+| PAT scope composition | 2 (alongside [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)) |
+| Team invitations (owner invites editor/viewer) | 3 |
+| Per-project role overrides | 3 |
+| 403 error envelope | 2 |
+| Audit logging (config flag) | 4 |
+| SSO / SAML (on-prem tier) | 4 |

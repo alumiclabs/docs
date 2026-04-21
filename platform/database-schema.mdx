@@ -1,0 +1,244 @@
+---
+title: "Database Schema"
+description: "Postgres tables: users, workspaces, projects, entities, refs, versions."
+icon: "database"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log), [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model), [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals), [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing)
+</Info>
+
+## Database Schema (backend, Phase 2)
+
+```sql
+-- Identity
+CREATE TABLE users (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email        TEXT UNIQUE NOT NULL,
+  display_name TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at   TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE workspaces (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       TEXT NOT NULL,
+  plan       TEXT NOT NULL DEFAULT 'free',
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE workspace_members (
+  workspace_id UUID REFERENCES workspaces(id),
+  user_id      UUID REFERENCES users(id),
+  role         TEXT NOT NULL,  -- 'owner' | 'editor' | 'viewer'
+  PRIMARY KEY (workspace_id, user_id)
+);
+
+CREATE TABLE projects (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID REFERENCES workspaces(id),
+  name         TEXT NOT NULL,
+  created_at   TIMESTAMPTZ DEFAULT now(),
+  archived_at  TIMESTAMPTZ
+);
+
+-- Per-project role overrides ([Permissions](/reference/permissions)). If no row, the user's workspace_members role
+-- applies. If both exist, the more restrictive role wins (workspace owner always
+-- retains full control).
+CREATE TABLE project_members (
+  project_id UUID REFERENCES projects(id),
+  user_id    UUID REFERENCES users(id),
+  role       TEXT NOT NULL,  -- 'owner' | 'editor' | 'viewer'
+  PRIMARY KEY (project_id, user_id)
+);
+
+CREATE TABLE pats (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      UUID REFERENCES users(id),
+  workspace_id UUID REFERENCES workspaces(id),
+  secret_hash  TEXT NOT NULL,
+  scopes       TEXT[] NOT NULL,
+  project_ids  UUID[],
+  label        TEXT NOT NULL,
+  expires_at   TIMESTAMPTZ,
+  last_used_at TIMESTAMPTZ,
+  created_at   TIMESTAMPTZ DEFAULT now()
+);
+
+-- Entities
+CREATE TABLE entities (
+  id               TEXT NOT NULL,
+  project_id       UUID REFERENCES projects(id),
+  type             TEXT NOT NULL,
+  name             TEXT NOT NULL,
+  data             JSONB NOT NULL,
+  editor_metadata  JSONB NOT NULL DEFAULT '{}',
+  tags             TEXT[] NOT NULL DEFAULT '{}',
+  version          INT NOT NULL DEFAULT 1,
+  created_at       TIMESTAMPTZ DEFAULT now(),
+  updated_at       TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (project_id, id)
+);
+CREATE INDEX idx_entities_type ON entities(project_id, type);
+CREATE INDEX idx_entities_tags ON entities USING gin (tags);
+
+-- Outbound references ([ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), extracted server-side on write)
+CREATE TABLE entity_refs (
+  project_id  UUID NOT NULL,
+  source_id   TEXT NOT NULL,
+  role        TEXT NOT NULL,
+  target_id   TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  context     TEXT,
+  PRIMARY KEY (project_id, source_id, role, target_id)
+);
+CREATE INDEX idx_entity_refs_target ON entity_refs(project_id, target_id);
+
+-- Append-only version log ([ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)) — source of truth for sync cursor
+CREATE TABLE entity_versions (
+  lsn                    BIGSERIAL PRIMARY KEY,
+  project_id             UUID NOT NULL,
+  entity_id              TEXT NOT NULL,
+  version                INT NOT NULL,
+  data                   JSONB NOT NULL,
+  editor_metadata        JSONB NOT NULL,
+  actor_id               UUID NOT NULL,          -- [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model) — User or Agent
+  actor_kind             TEXT NOT NULL,          -- 'user' | 'agent'
+  agent_run_id           UUID,                   -- [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model) — null for human writes
+  on_behalf_of_user_id   UUID REFERENCES users(id),  -- [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model) — accountable human for agent writes
+  written_by             UUID REFERENCES users(id), -- retained; = actor_id for user writes, = on_behalf_of_user_id for agent writes
+  written_via            TEXT NOT NULL,          -- 'browser' | 'plugin' | 'cli' | 'agent' | 'import'
+  written_at             TIMESTAMPTZ DEFAULT now(),
+  write_id               TEXT NOT NULL,          -- idempotency key ([ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect))
+  UNIQUE (project_id, write_id)
+);
+CREATE INDEX idx_versions_entity ON entity_versions(project_id, entity_id, version);
+CREATE INDEX idx_versions_agent_run ON entity_versions(agent_run_id) WHERE agent_run_id IS NOT NULL;
+
+-- Assets ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)) — metadata; bytes live in object storage
+CREATE TABLE assets (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id   UUID REFERENCES projects(id),
+  kind         TEXT NOT NULL,
+  content_type TEXT NOT NULL,
+  byte_length  BIGINT NOT NULL,
+  sha256       TEXT NOT NULL,
+  storage_key  TEXT NOT NULL,
+  bundle       TEXT,
+  committed    BOOLEAN NOT NULL DEFAULT false,
+  created_at   TIMESTAMPTZ DEFAULT now()
+);
+
+-- Usage metering ([ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag), extended per [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model))
+CREATE TABLE usage_events (
+  id           BIGSERIAL PRIMARY KEY,
+  workspace_id UUID NOT NULL,
+  project_id   UUID,
+  actor_id     UUID,                     -- [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model) — User or Agent
+  agent_run_id UUID,                     -- [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model) — null for human writes
+  route        TEXT NOT NULL,
+  method       TEXT NOT NULL,
+  bytes_in     BIGINT,
+  bytes_out    BIGINT,
+  duration_ms  INT,
+  cost_usd     NUMERIC(12,4),            -- LLM tokens × model price; null for non-agent
+  occurred_at  TIMESTAMPTZ DEFAULT now()
+);
+
+-- Agents ([ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model), spec/28). Agents are actors peer to users.
+CREATE TABLE agents (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id      UUID NOT NULL REFERENCES workspaces(id),
+  owner_user_id     UUID NOT NULL REFERENCES users(id),
+  display_name      TEXT NOT NULL,
+  kind              TEXT NOT NULL,        -- 'llm' | 'rule' | 'external' | 'system'
+  credential_hash   TEXT NOT NULL,
+  scopes            TEXT[] NOT NULL,
+  rate_limit_plan   TEXT,
+  per_run_write_cap INT,
+  budget_usd        NUMERIC(12,4),
+  created_at        TIMESTAMPTZ DEFAULT now(),
+  revoked_at        TIMESTAMPTZ
+);
+
+-- AgentRuns ([ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model)) — audit/revert unit
+CREATE TABLE agent_runs (
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_id              UUID NOT NULL REFERENCES agents(id),
+  project_id            UUID NOT NULL REFERENCES projects(id),
+  triggered_by_kind     TEXT NOT NULL,    -- 'manual' | 'scheduled' | 'event' | 'webhook'
+  triggered_by_actor_id UUID,
+  started_at            TIMESTAMPTZ DEFAULT now(),
+  ended_at              TIMESTAMPTZ,
+  status                TEXT NOT NULL,    -- 'running' | 'succeeded' | 'failed' | 'reverted' | 'partially-reverted'
+  write_count           INT DEFAULT 0,
+  proposal_count        INT DEFAULT 0,
+  cost_usd              NUMERIC(12,4),
+  summary               TEXT,
+  errors                JSONB NOT NULL DEFAULT '[]'
+);
+CREATE INDEX idx_agent_runs_project ON agent_runs(project_id, started_at DESC);
+
+-- Entity proposals ([ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals))
+CREATE TABLE entity_proposals (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id           UUID NOT NULL REFERENCES projects(id),
+  entity_id            TEXT NOT NULL,
+  target_version       INT NOT NULL,
+  patch                JSONB NOT NULL,
+  proposer_actor_id    UUID NOT NULL,
+  agent_run_id         UUID REFERENCES agent_runs(id),
+  summary              TEXT,
+  state                TEXT NOT NULL,    -- 'open' | 'approved' | 'changes-requested' | 'rejected' | 'superseded' | 'withdrawn'
+  required_approvals   INT NOT NULL DEFAULT 1,
+  created_at           TIMESTAMPTZ DEFAULT now(),
+  resolved_at          TIMESTAMPTZ
+);
+CREATE INDEX idx_proposals_open ON entity_proposals(project_id, state) WHERE state = 'open';
+
+CREATE TABLE proposal_reviews (
+  proposal_id       UUID NOT NULL REFERENCES entity_proposals(id),
+  reviewer_actor_id UUID NOT NULL,
+  decision          TEXT NOT NULL,       -- 'approve' | 'request-changes' | 'reject'
+  comment           TEXT,
+  created_at        TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (proposal_id, reviewer_actor_id)
+);
+
+-- Audit log (Phase 4+, [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing) "Optional audit logging behind a config flag").
+-- Append-only; rotate by time, never mutate. Gated by ALUMIC_AUDIT_LOG=1.
+CREATE TABLE audit_events (
+  id            BIGSERIAL PRIMARY KEY,
+  workspace_id  UUID NOT NULL,
+  actor_user_id UUID,                   -- null for system events
+  actor_pat_id  UUID,                   -- set when the actor used a PAT
+  kind          TEXT NOT NULL,          -- 'pat.created' | 'role.changed' | 'project.archived' | 'plugin.published' | ...
+  target        JSONB NOT NULL,         -- kind-specific payload
+  client_kind   TEXT,                   -- 'browser' | 'plugin' | 'cli'
+  occurred_at   TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX idx_audit_workspace_time ON audit_events(workspace_id, occurred_at DESC);
+
+-- Save slots (player-game-state; [Save System](/reference/save-system))
+CREATE TABLE save_slots (
+  project_id UUID REFERENCES projects(id),
+  user_id    UUID REFERENCES users(id),
+  slot_id    TEXT NOT NULL,
+  data       JSONB NOT NULL,
+  metadata   JSONB,
+  updated_at TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (project_id, user_id, slot_id)
+);
+
+-- Leaderboards (optional, per-template)
+CREATE TABLE leaderboard_entries (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID REFERENCES projects(id),
+  board_id   TEXT NOT NULL,
+  user_id    UUID REFERENCES users(id),
+  score      BIGINT NOT NULL,
+  metadata   JSONB,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX idx_leaderboard_score ON leaderboard_entries(project_id, board_id, score DESC);
+```

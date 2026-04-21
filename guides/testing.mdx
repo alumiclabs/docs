@@ -1,0 +1,115 @@
+---
+title: "Testing"
+description: "Vitest patterns and plugin test harness."
+icon: "vial"
+---
+
+## Testing Strategy
+
+### Unit Tests
+
+Each package has unit tests in `__tests__/`:
+
+```typescript
+// packages/core/__tests__/channel.test.ts
+import { describe, test, expect } from 'vitest';
+import { defineChannel, createEventBus } from '../src/channel';
+import { createTagRegistry } from '@alumic/tags';
+
+describe('EventBus', () => {
+  test('emits to subscribers', () => {
+    const bus = createEventBus(createTagRegistry());
+    const received: number[] = [];
+
+    bus.on('Test', (n: number) => received.push(n));
+    bus.emit('Test', 42);
+
+    expect(received).toEqual([42]);
+  });
+
+  test('hierarchical dispatch', () => {
+    const bus = createEventBus(createTagRegistry());
+    const received: string[] = [];
+
+    bus.on('Combat', () => received.push('combat'));
+    bus.on('Combat.Damage', () => received.push('damage'));
+    bus.on('Combat.Damage.Dealt', () => received.push('dealt'));
+
+    bus.emit('Combat.Damage.Dealt', {});
+
+    expect(received).toEqual(['dealt', 'damage', 'combat']);
+  });
+});
+```
+
+### Integration Tests
+
+Test plugin composition and lifecycle:
+
+```typescript
+// packages/core/__tests__/integration.test.ts
+describe('App integration', () => {
+  test('plugins build in dependency order', async () => {
+    const order: string[] = [];
+
+    const pluginA = definePlugin({
+      meta: { name: 'A', dependencies: ['B'] },
+      build() { order.push('A'); },
+    });
+
+    const pluginB = definePlugin({
+      meta: { name: 'B' },
+      build() { order.push('B'); },
+    });
+
+    const app = new App({ plugins: [pluginA, pluginB], headless: true });
+    await app.boot();
+
+    expect(order).toEqual(['B', 'A']);
+    app.shutdown();
+  });
+});
+```
+
+### Template Tests
+
+Template-level tests verify end-to-end behavior:
+
+```typescript
+// templates/topdown-action/__tests__/game.test.ts
+describe('Top-Down Action', () => {
+  test('player moves on input', async () => {
+    const app = createApp(template);
+    await app.boot();
+    app.startSession();
+    app.pushScene('main');
+    app.addPlayer('test');
+
+    // Simulate input
+    simulateKeyPress('KeyW');
+    app.tick(1 / 60);
+    app.tick(1 / 60);
+
+    const player = app.ctx.get(PlayerSubsystem);
+    expect(player.position.z).toBeLessThan(0); // moved forward
+
+    app.shutdown();
+  });
+});
+```
+
+### Running Tests
+
+```bash
+# All tests from root
+bun test
+
+# Specific package
+bun test packages/core
+
+# Watch mode
+bun test --watch
+
+# With coverage
+bun test --coverage
+```

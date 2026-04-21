@@ -1,0 +1,480 @@
+---
+title: "State Machines"
+description: "@alumic/state (xstate-backed) and @alumic/flow runtimes."
+icon: "arrows-rotate"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-006 xstate v5 backs @alumic/state; @alumic/flow stays custom](/decisions/006-xstate-plus-custom-flow), [ADR-017 Shared VariableRegistry in @alumic/core](/decisions/017-shared-variable-registry)
+</Info>
+
+## Overview
+
+Alumic provides two complementary systems for managing state transitions:
+
+1. **`@alumic/state`** — A hierarchical state machine package built on top of **xstate v5**. Used for imperative, code-driven state management (game modes, character states, UI navigation). See [ADR-006 xstate v5 backs @alumic/state; @alumic/flow stays custom](/decisions/006-xstate-plus-custom-flow).
+2. **`@alumic/flow`** — A **node-graph runtime (FlowGraph)** for data-driven, authored flow execution (dialogue trees, quest sequences, cinematic triggers). Custom AST-walking interpreter; not xstate-backed (authored graphs are not statecharts).
+
+These systems serve different purposes and can be used together.
+
+
+## When to Use Which
+
+| Use Case | System | Why |
+|----------|--------|-----|
+| Character states (idle, run, attack, hurt) | `@alumic/state` HSM | Imperative transitions driven by game logic |
+| Game modes (menu, gameplay, cutscene, pause) | `@alumic/state` HSM | Code-driven, hierarchical (gameplay has sub-states) |
+| Dialogue trees | `@alumic/flow` FlowGraph | Data-driven, authored in JSON, interpreted at runtime |
+| Quest sequences | `@alumic/flow` FlowGraph | Authored flow with conditions and branching |
+| Ability combos | `@alumic/state` HSM | Timing-dependent transitions driven by input |
+| Cinematic sequences | `@alumic/flow` FlowGraph | Authored timeline with triggers |
+| AI behavior trees | `@alumic/state` HSM | Code-driven decision logic |
+
+
+## @alumic/state — Hierarchical State Machine
+
+### Design Note: xstate as Backing Runtime
+
+`@alumic/state` is a thin facade over xstate v5. HSM semantics (guards, entry/exit ordering, parallel regions, history states) are delegated to xstate; `@alumic/state` provides the `defineState` / `defineStateMachine` / `createStateMachine` surface so plugin authors aren't directly coupled to xstate's config shape, and adds Alumic-specific wiring (TickContext integration, channel emissions).
+
+Serialization uses xstate's native APIs — `actor.getPersistedSnapshot()` for save, `createActor(definition, { snapshot })` for restore. The `@alumic/state` surface re-exposes these through its own methods.
+
+xstate was chosen over a clean-room HSM because HSM correctness is hard and xstate has a decade of polish; the engine-portability concern for Alumic's content doesn't apply at the *runtime* layer (authored graph JSON remains the portable artifact). See [ADR-006 xstate v5 backs @alumic/state; @alumic/flow stays custom](/decisions/006-xstate-plus-custom-flow).
+
+### Defining a State Machine
+
+```typescript
+import { defineStateMachine, defineState } from '@alumic/state';
+
+// Define individual states
+const Idle = defineState('Idle', {
+  onEnter(ctx) {
+    ctx.playAnimation('idle');
+  },
+  onUpdate(ctx, tick) {
+    if (ctx.input.isPressed('attack')) {
+      ctx.transition('Attack');
+    }
+    if (ctx.input.axis('move').length > 0.1) {
+      ctx.transition('Run');
+    }
+  },
+  onExit(ctx) {
+    // cleanup
+  },
+});
+
+const Run = defineState('Run', {
+  onEnter(ctx) {
+    ctx.playAnimation('run');
+  },
+  onUpdate(ctx, tick) {
+    if (ctx.input.axis('move').length < 0.1) {
+      ctx.transition('Idle');
+    }
+    if (ctx.input.isPressed('attack')) {
+      ctx.transition('Attack');
+    }
+  },
+});
+
+const Attack = defineState('Attack', {
+  onEnter(ctx) {
+    ctx.playAnimation('attack');
+    ctx.data.attackTimer = 0;
+  },
+  onUpdate(ctx, tick) {
+    ctx.data.attackTimer += tick.dt;
+    if (ctx.data.attackTimer >= 0.5) {
+      ctx.transition('Idle');
+    }
+  },
+});
+
+// Compose into a state machine
+const CharacterFSM = defineStateMachine({
+  name: 'CharacterState',
+  initial: 'Idle',
+  states: [Idle, Run, Attack],
+});
+```
+
+### State Interface
+
+```typescript
+export interface StateConfig<TCtx = any> {
+  /**
+   * Called once when this state is entered.
+   */
+  onEnter?(ctx: TCtx): void;
+
+  /**
+   * Called every tick while this state is active.
+   */
+  onUpdate?(ctx: TCtx, tick: TickContext): void;
+
+  /**
+   * Called once when this state is exited.
+   */
+  onExit?(ctx: TCtx): void;
+
+  /**
+   * Optional child states for hierarchical nesting.
+   * When this state is active, its child HSM also runs.
+   */
+  children?: StateMachineConfig;
+}
+
+export function defineState<TCtx = any>(
+  name: string,
+  config: StateConfig<TCtx>,
+): StateDefinition<TCtx>;
+```
+
+### State Machine Interface
+
+```typescript
+export interface StateMachineConfig<TCtx = any> {
+  /** Name for debugging. */
+  name: string;
+
+  /** Initial state name. */
+  initial: string;
+
+  /** All possible states. */
+  states: StateDefinition<TCtx>[];
+
+  /**
+   * Optional transition guards.
+   * Called before each transition; return false to block.
+   */
+  canTransition?(from: string, to: string, ctx: TCtx): boolean;
+}
+
+export function defineStateMachine<TCtx = any>(
+  config: StateMachineConfig<TCtx>,
+): StateMachineDefinition<TCtx>;
+```
+
+### State Machine Runtime
+
+```typescript
+export interface StateMachineInstance<TCtx = any> {
+  /** The current state name. */
+  readonly current: string;
+
+  /** The full state path (for HSM): e.g., 'Gameplay.Combat.Melee' */
+  readonly path: string;
+
+  /** Transition to a named state. */
+  transition(to: string): void;
+
+  /** Tick the current state. */
+  update(tick: TickContext): void;
+
+  /** Force-set to a state without transition callbacks. */
+  reset(to?: string): void;
+
+  /** History of state transitions (for debugging). */
+  readonly history: readonly { from: string; to: string; time: number }[];
+}
+
+/** Create a running instance of a state machine. */
+export function createStateMachine<TCtx>(
+  definition: StateMachineDefinition<TCtx>,
+  ctx: TCtx,
+): StateMachineInstance<TCtx>;
+```
+
+### Hierarchical States
+
+States can contain child state machines for nested behavior:
+
+```typescript
+const Gameplay = defineState('Gameplay', {
+  children: defineStateMachine({
+    name: 'GameplayMode',
+    initial: 'Exploration',
+    states: [
+      defineState('Exploration', {
+        onUpdate(ctx, tick) {
+          if (ctx.enemyNearby()) ctx.transition('Combat');
+        },
+      }),
+      defineState('Combat', {
+        children: defineStateMachine({
+          name: 'CombatPhase',
+          initial: 'PlayerTurn',
+          states: [
+            defineState('PlayerTurn', { /* ... */ }),
+            defineState('EnemyTurn', { /* ... */ }),
+          ],
+        }),
+      }),
+    ],
+  }),
+});
+```
+
+When `Gameplay` is entered, its child HSM starts at `Exploration`. The full state path is `Gameplay.Exploration`. Transitioning to `Combat` produces `Gameplay.Combat.PlayerTurn`.
+
+### Transition Events
+
+State machines emit events on the event bus:
+
+```typescript
+export const StateTransitioned = defineChannel<{
+  machine: string;     // e.g., 'CharacterState'
+  from: string;        // e.g., 'Idle'
+  to: string;          // e.g., 'Run'
+  path: string;        // e.g., 'Run' (full path for HSM)
+}>('State.Transitioned');
+```
+
+
+## @alumic/flow — Node-Graph Runtime
+
+### What is a FlowGraph?
+
+A FlowGraph is a data-driven program defined as a JSON graph of typed nodes and edges. At runtime, an interpreter walks the graph — visiting nodes, evaluating conditions on edges, and executing effects. It is the runtime for `.graph.json` files.
+
+### Core Concepts
+
+**Node Types:** Each node has a `type` that determines its behavior. The flow runtime maintains a registry of node type handlers.
+
+**Ports:** Nodes have typed input and output ports. Edges connect an output port on one node to an input port on another.
+
+**Execution Model:** The interpreter maintains a cursor (current node). Each tick, it:
+1. Evaluates the current node's handler
+2. The handler returns a port ID indicating which output to follow
+3. The interpreter follows the edge from that port to the next node
+4. If no edge exists for that port, execution pauses (waiting for external input)
+
+### Built-In Node Types
+
+```typescript
+// The flow runtime includes these built-in node types:
+
+/** Entry point — execution starts here. */
+type EntryNode = { type: 'entry' };
+
+/** Display text and wait for advancement. */
+type DialogueNode = {
+  type: 'dialogue';
+  data: { speaker: string; lineId: string };
+};
+
+/** Present choices and branch based on selection. */
+type ChoiceNode = {
+  type: 'choice';
+  data: { prompt: string };
+  // Each choice is an output port
+};
+
+/** Evaluate a condition and branch. */
+type BranchNode = {
+  type: 'branch';
+  data: { condition: Condition };
+  // Two output ports: 'true' and 'false'
+};
+
+/** Set a variable value. */
+type SetVarNode = {
+  type: 'set-var';
+  data: { var: string; value: unknown };
+};
+
+/** Wait for a duration. */
+type WaitNode = {
+  type: 'wait';
+  data: { seconds: number };
+};
+
+/** Emit an event on a channel. */
+type EmitNode = {
+  type: 'emit';
+  data: { tag: string; payload: Record<string, unknown> };
+};
+
+/** Call a registered function. */
+type CallNode = {
+  type: 'call';
+  data: { fn: string; args: Record<string, unknown> };
+};
+
+/** End execution. */
+type EndNode = { type: 'end' };
+```
+
+### Custom Node Types
+
+Plugins can register custom node types:
+
+```typescript
+import { registerNodeType } from '@alumic/flow';
+
+registerNodeType('give-item', {
+  execute(node, ctx) {
+    const { itemId, quantity } = node.data;
+    ctx.get(InventorySubsystem).addItem(itemId, quantity);
+    return 'out'; // follow the default output port
+  },
+});
+```
+
+### FlowGraph Runtime API
+
+```typescript
+export interface FlowRunner {
+  /** The graph being executed. */
+  readonly graph: Graph;
+
+  /** Current node ID. Null if execution has ended. */
+  readonly currentNodeId: string | null;
+
+  /** Whether the runner is waiting for external input. */
+  readonly waiting: boolean;
+
+  /** Start or restart execution from the entry node. */
+  start(): void;
+
+  /** Advance one step (evaluate current node, follow edge). */
+  step(): FlowStepResult;
+
+  /**
+   * Provide external input (e.g., player chose option 2).
+   * Resumes execution if waiting.
+   */
+  input(portId: string): void;
+
+  /** Get the current variable context. */
+  readonly variables: VariableContext;
+
+  /** Visit history: which nodes have been visited and how many times. */
+  readonly visits: ReadonlyMap<string, number>;
+
+  /** Pause execution. */
+  pause(): void;
+
+  /** Resume execution. */
+  resume(): void;
+
+  /** Stop and reset execution. */
+  stop(): void;
+}
+
+export type FlowStepResult =
+  | { status: 'advanced'; nodeId: string }        // moved to next node
+  | { status: 'waiting'; nodeId: string }          // waiting for input
+  | { status: 'ended' }                            // reached an end node
+  | { status: 'error'; nodeId: string; error: Error }; // node handler threw
+
+export function createFlowRunner(graph: Graph, ctx: AppContext): FlowRunner;
+```
+
+### Variable Context
+
+The flow runtime maintains a variable store scoped to the running graph:
+
+```typescript
+export interface VariableContext {
+  /** Get a variable value by dotted path. */
+  get(path: string): unknown;
+
+  /** Set a variable value. */
+  set(path: string, value: unknown): void;
+
+  /** Check if a variable exists. */
+  has(path: string): boolean;
+
+  /** Get all variables as a plain object (for serialization). */
+  snapshot(): Record<string, unknown>;
+
+  /** Restore variables from a snapshot. */
+  restore(snapshot: Record<string, unknown>): void;
+}
+```
+
+Variables can reference game state via prefixed paths:
+- `local.myVar` — graph-local variable (resolved by the FlowRunner itself)
+- `player.health` — read from player subsystem
+- `quest.tutorial.completed` — read from quest subsystem
+- `inventory.has.potion-health` — read from inventory subsystem
+
+Non-`local.*` prefixes resolve through the **shared VariableRegistry** (`ctx.variables`, [Template System](/reference/template-system) concept — see [ADR-017 Shared VariableRegistry in @alumic/core](/decisions/017-shared-variable-registry)). Plugins register providers via `ctx.variables.register(provider)` during `build()`. The same registry is queried by dialogue condition evaluation, UI binding expressions ([UI Integration](/reference/ui-integration)), and save-chunk variable snapshots, so there is one source of truth for what `player.health` means across subsystems.
+
+```typescript
+export interface VariableProvider {
+  readonly prefix: string;       // 'player', 'quest', 'inventory'
+  get(path: string): unknown;    // full path including prefix
+  has(path: string): boolean;
+  set?(path: string, value: unknown): void;
+}
+```
+
+Collision policy: registering two providers for the same prefix throws during `build()`.
+
+
+## Serialization
+
+### State Machine Serialization
+
+Serialization delegates to xstate's native snapshot APIs:
+
+```typescript
+// Snapshot a state machine instance
+const snapshot = fsm.getPersistedSnapshot();
+// snapshot is a JSON-serializable value suitable for save chunks.
+// Contains current state path, context, history, and any active actors.
+
+// Restore
+const fsm = createStateMachine(MachineDef, ctx, { snapshot });
+// xstate re-hydrates into the persisted state; entry actions for the
+// restored state are NOT re-run (per xstate semantics).
+```
+
+This replaces the pre-[ADR-006 xstate v5 backs @alumic/state; @alumic/flow stays custom](/decisions/006-xstate-plus-custom-flow) ad-hoc `{ current, path, data }` shape. Save chunks ([Save System](/reference/save-system)) call `getPersistedSnapshot()` in their `save()` function and pass the snapshot back to `createStateMachine` in `load()`.
+
+### FlowGraph Serialization and Visit-State Ownership
+
+Visit counts and graph-local variables live on the **`FlowRunner` instance**, not on the entity database (which is authoring-only — see [Entity Graph](/reference/entity-graph)). Each runner holds its own `{ currentNodeId, variables, visits }`.
+
+Cross-graph state (how many times has *any* dialogue visited the hermit's intro node?) is aggregated by a Session-scope subsystem — for dialogue, `DialogueSubsystem` ([Dialogue System](/reference/dialogue-system)) maintains `globalVisits: Map<entityId, Map<nodeId, number>>`. The save chunk is:
+
+```typescript
+// From DialogueSubsystem.save():
+{
+  activeRunners: runners.map(r => r.snapshot()),
+  globalVisits: Object.fromEntries(globalVisits),
+}
+```
+
+```typescript
+// Snapshot a flow runner
+const snapshot = {
+  graphId: runner.graph.id,
+  currentNodeId: runner.currentNodeId,
+  variables: runner.variables.snapshot(),
+  visits: Object.fromEntries(runner.visits),
+};
+
+// Restore
+const runner = createFlowRunner(loadGraph(snapshot.graphId), ctx);
+runner.variables.restore(snapshot.variables);
+// visits restored internally
+```
+
+
+## Integration With Other Systems
+
+### Dialogue
+
+`@alumic/dialogue` is built on `@alumic/flow`. A dialogue graph is a FlowGraph with `dialogue` and `choice` node types. The dialogue runtime is a specialized FlowRunner that knows how to present text and choices.
+
+### Quests
+
+Quest sequences can be modeled as FlowGraphs where nodes represent objectives and edges represent completion transitions. Custom node types like `kill-count`, `reach-location`, and `talk-to-npc` are registered by the quest plugin.
+
+### Cinematics
+
+Cinematic sequences are FlowGraphs with timeline-oriented node types: `camera-move`, `fade`, `play-audio`, `wait`, `spawn-entity`.

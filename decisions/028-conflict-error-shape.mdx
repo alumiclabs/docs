@@ -1,0 +1,69 @@
+---
+title: "ADR-028: Optimistic-concurrency conflict shape"
+description: "Entity writes require an `If-Match: <version>` header."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab) promised the API "rejects stale writes with a conflict error that the client surfaces." The shape of that error was never specified. Editor UX, engine-plugin reconciliation, and CI writers all need a stable contract.
+
+## Decision
+
+Entity writes require an `If-Match: <version>` header. Stale writes return:
+
+```http
+HTTP/1.1 409 Conflict
+Content-Type: application/json
+
+{
+  "error": "conflict",
+  "entityId": "old-hermit",
+  "clientVersion": 7,
+  "currentVersion": 9,
+  "currentUpdatedAt": "2026-04-20T15:31:12.000Z",
+  "currentUpdatedBy": { "userId": "01HR...", "clientKind": "browser" | "plugin" | "cli" },
+  "fields": ["data.bio", "data.attributes.wisdom"]
+}
+```
+
+`fields` is a best-effort list of dotted paths the client's `data`/`editor_metadata` differed from the server's current state; computed by structural diff on PATCH, not validated for completeness.
+
+Clients handle:
+- **Browser editor:** surface a conflict modal ("The current state has changed since you opened this. Keep yours / Discard yours / Open side-by-side").
+- **Engine plugin:** emit a log line, re-pull via [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol) events, retry the write if still applicable.
+- **CLI:** exit non-zero with the JSON payload on stderr.
+
+For large batch writes (future), `409` carries a `conflicts: [...]` array naming each failed entity; successful writes in the same batch are still persisted.
+
+### `proposal-required` variant ([ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals))
+
+When a write is rejected by an approval policy (not by version skew), the server returns `409 Conflict` with a `proposal-required` code:
+
+```json
+{
+  "error": "conflict",
+  "code": "proposal-required",
+  "entityId": "old-hermit",
+  "policy": { "kind": "agent-writes-require-human", "humanRole": "editor" },
+  "suggestion": "POST /api/projects/.../entities/old-hermit/proposals"
+}
+```
+
+Clients handle: resubmit via the proposals endpoint ([ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)). Client SDKs may auto-redirect `mode: 'auto'` writes from committed to proposal.
+
+## Consequences
+
+**Enables:** Every client has a single, stable conflict contract. UX can be consistent across tabs and machines. Retries are safe because the server rejected stale writes before mutating.
+
+**Obligates:** The backend computes the field diff on conflict. `version` is present on every entity response. Clients must not send writes without an `If-Match`; missing headers return `428 Precondition Required`.
+
+**Forecloses:** Blind last-write-wins semantics. Clients that want overwrite behavior must re-read, set `If-Match` to the server's current version, then PATCH.
+
+## Related
+
+- Specs: [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [Engine Plugin](/platform/engine-plugin), [Project Management](/reference/project-management)
+- Depends on: [ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab).
+- Informs: [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals) (policy-gated rejection uses the `proposal-required` shape defined here).

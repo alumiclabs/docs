@@ -1,0 +1,100 @@
+---
+title: "Multiplayer"
+description: "Colyseus-based rooms; authoring API is separate."
+icon: "users"
+---
+
+## Real-Time Multiplayer — `@alumic/multiplayer` (Phase 3)
+
+Orthogonal to the authoring API above. Multiplayer is runtime-game-state networking for *players*, not authoring sync for *designers*.
+
+### Why Colyseus
+
+- **TypeScript-native** — server and client both TS.
+- **Schema-based state sync** — automatic delta encoding.
+- **Room-based** — natural fit for game sessions/lobbies.
+- **WebSocket transport** — low-latency bidirectional.
+
+### Architecture
+
+```
+┌──────────────────┐          ┌──────────────────┐
+│  Browser Client  │          │  Browser Client   │
+│  (Alumic App)    │          │  (Alumic App)     │
+│  Multiplayer     │ ws://    │  Multiplayer      │
+│  Subsystem       │◄────────►│  Subsystem        │
+└────────┬─────────┘          └────────┬──────────┘
+         │         WebSocket           │
+         └──────────┬──────────────────┘
+         ┌──────────▼──────────┐
+         │   Colyseus Server   │
+         │  (stateful rooms)   │
+         └─────────────────────┘
+```
+
+The Colyseus server is a separate process from the entity-API backend; they share the Postgres `users` table for auth but nothing else. Room state is ephemeral — not a save artifact ([Save System](/reference/save-system)).
+
+### Multiplayer Subsystem
+
+```typescript
+export interface MultiplayerConfig {
+  serverUrl: string;
+  /**
+   * Short-lived room ticket minted by `POST /api/projects/:pid/multiplayer/tickets`.
+   * The ticket carries `{ userId, workspaceId, projectId, exp }` and is valid for
+   * ~30s — just long enough to join the Colyseus room. JWT sessions may mint tickets;
+   * PATs may not (authoring credentials are not runtime credentials).
+   */
+  authToken?: string;
+}
+
+export const MultiplayerSubsystem = defineSubsystem<MultiplayerManager>(
+  Scope.Session,
+  (ctx) => ({
+    async init() { return new MultiplayerManager(ctx); },
+    deinit(mgr) { mgr.disconnect(); },
+  }),
+);
+
+export class MultiplayerManager {
+  async connect(config: MultiplayerConfig): Promise<void>;
+  async joinRoom<T>(roomName: string, options?: Record<string, unknown>): Promise<RoomHandle<T>>;
+  leaveRoom(): Promise<void>;
+  readonly room: RoomHandle<unknown> | null;
+  readonly state: 'disconnected' | 'connecting' | 'connected' | 'error';
+  disconnect(): void;
+}
+```
+
+### Room Handle
+
+```typescript
+export interface RoomHandle<TState> {
+  readonly roomId: string;
+  readonly roomName: string;
+  readonly state: TState;
+  readonly sessionId: string;
+  send(type: string, data?: unknown): void;
+  onStateChange(callback: (state: TState) => void): Disposable;
+  onMessage<T>(type: string, callback: (data: T) => void): Disposable;
+  onJoin(callback: (sessionId: string) => void): Disposable;
+  onLeave(callback: (sessionId: string) => void): Disposable;
+  leave(): Promise<void>;
+}
+```
+
+### Multiplayer Event Channels
+
+```typescript
+export const Connected = defineChannel<{ serverUrl: string }>('Multiplayer.Connected');
+export const Disconnected = defineChannel<{ reason: string }>('Multiplayer.Disconnected');
+export const RoomJoined = defineChannel<{ roomId: string; roomName: string; sessionId: string }>('Multiplayer.Room.Joined');
+export const RoomLeft = defineChannel<{ roomId: string }>('Multiplayer.Room.Left');
+export const PlayerJoined = defineChannel<{ sessionId: string; roomId: string }>('Multiplayer.Player.Joined');
+export const PlayerLeft = defineChannel<{ sessionId: string; roomId: string }>('Multiplayer.Player.Left');
+export const RoomStateChanged = defineChannel<{ roomId: string }>('Multiplayer.Room.StateChanged');
+```
+
+### Client-Side Prediction (Phase 5)
+
+Deferred. Initial multiplayer (Phase 3) uses simple state sync.

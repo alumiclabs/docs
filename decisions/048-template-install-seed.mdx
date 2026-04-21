@@ -1,0 +1,42 @@
+---
+title: "ADR-048: Template install seeds entities and rewrites refs server-side"
+description: "The install pipeline runs **server-side** in one transaction-scoped job per install:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4) makes templates and first-party bundles install into user projects by cloning seed entities. [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage) makes asset IDs project-scoped. A template's seed bundle therefore contains entity rows whose asset-ref fields point at IDs local to the template bundle; those IDs must be rewritten to the target project's asset IDs during install. The install flow — uploads, ID remint, ref rewrite, transactional boundaries — was not specified.
+
+Spec 14 notes "at template install, seed bytes are uploaded into the new project's asset table and get fresh IDs" but does not describe how entity references to those assets are updated.
+
+## Decision
+
+The install pipeline runs **server-side** in one transaction-scoped job per install:
+
+1. **Materialize manifests.** The marketplace pulls the template bundle (`entities/`, `strings/`, `assets/manifest.json`, `assets/blobs/<sha256>`). The manifest maps `bundle-local asset id → sha256 + kind + contentType`.
+2. **Upload asset blobs.** For each blob, the installer mints a target-project asset ID, uploads the bytes to object storage under the target project's storage prefix, and writes a `bundle_asset_id → target_asset_id` map.
+3. **Clone entities.** Each seed entity row is inserted with a freshly minted entity ID under `(target_project_id, entity_id)`. A `bundle_entity_id → target_entity_id` map accumulates.
+4. **Rewrite references.** Before persisting each cloned entity, the installer rewrites references using both maps: asset-ref fields (`icon`, `portrait`, `thumbnail`, Scene `assetRefs`) map through the asset map; entity-ref fields (`speaker`, `questGiver`, scene-map values in `TemplateManifest.scenes`) map through the entity map.
+5. **Extract and index.** The reference extractor ([ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api)) runs on each rewritten entity exactly as for any other write.
+6. **Commit or rollback.** If any step fails the whole install rolls back — no partial state survives.
+
+`TemplateManifest.scenes` (spec 17) is the same map, rewritten at install time; game code calls `app.pushScene('main')` and the loader resolves through the now-rewritten map.
+
+For Phase-1 shim ([ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim)), the same installer runs client-side against the in-memory store, with the same rewrite discipline, so template code written against Phase 1 works unchanged when the backend arrives.
+
+## Consequences
+
+**Enables:** Templates are position-independent — bundle asset IDs and entity IDs are opaque; target-project IDs are minted fresh. Two installs of the same template into two projects produce two disjoint ID sets. `alumic import` uses the same pipeline.
+
+**Obligates:** Every entity type that carries an asset or entity reference must declare where the refs live (via its ref extractor) so the installer can rewrite without walking unknown shapes. Scene node types (spec 23) must carry `assetRefs: string[]` alongside their typed data.
+
+**Forecloses:** Template bundles that ship with "stable" asset IDs that consumers expect to dereference. Asset IDs are project-scoped; cross-project reference is a plugin concern (e.g., marketplace-provided Constant entities), not an install concern.
+
+## Related
+
+- Specs: [Template System](/reference/template-system), [Asset Management](/reference/asset-management), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database)
+- Depends on: [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage).
+- Informs: [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4).

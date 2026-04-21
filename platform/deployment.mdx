@@ -1,0 +1,38 @@
+---
+title: "Deployment"
+description: "Hosted SaaS, on-prem, single-user desktop — one codebase."
+icon: "cloud"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim), [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag)
+</Info>
+
+## Overview
+
+Under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)), the backend is the **primary data layer**, not a Phase 4 add-on. A single Fastify + Postgres + MinIO stack serves all three deployment modes — hosted SaaS, on-prem, single-user desktop — from one codebase. This chapter documents:
+
+1. **The Entity API** — the central HTTP surface for all authored content.
+2. **Authentication and identity** — session JWTs for browsers, PATs for plugins/CLI/CI.
+3. **Sync and push** — the incremental event stream that keeps clients in sync.
+4. **Multiplayer** (`@alumic/multiplayer`) — the Colyseus-based runtime networking layer, orthogonal to the authoring API.
+
+Phasing summary (details in [Roadmap](/concepts/roadmap)):
+
+| Concern | Phase | ADR |
+|---|---|---|
+| In-memory entity-db shim (client-side) | 1 | [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim) |
+| Fastify + Postgres + MinIO + entity CRUD + auth | 2 | [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing) |
+| Team features (roles, invitations), multiplayer | 3 | [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing) |
+| Marketplace, SSO/SAML, billing, metering enforcement | 4 | [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag) |
+
+
+## Deployment packaging
+
+The backend lives in `packages/backend/` inside the same Bun workspace as the rest of Alumic ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)). It is not a separate repo.
+
+import { DeploymentModes } from '/snippets/deployment-modes.mdx';
+
+<DeploymentModes />
+
+Deployment mode is selected by config (`ALUMIC_DEPLOYMENT=saas|onprem|desktop`). Features that differ by mode (SSO gating, multi-workspace admin, marketplace access) are feature-flagged, not forked.

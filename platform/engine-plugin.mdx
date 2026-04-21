@@ -1,0 +1,248 @@
+---
+title: "Engine Plugin"
+description: "Unity, Unreal, Godot integrations mirroring a project locally."
+icon: "gamepad-modern"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), [ADR-007 Plugin identity lives in code via definePlugin()](/decisions/007-plugin-identity-in-code), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log), [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect), [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), [ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation), [ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape), [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag), [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing)
+</Info>
+
+## Overview
+
+The **engine plugin** is Alumic's legitimate local surface: an editor-time integration that lives inside a user's Unity/Unreal/Godot project, mirrors an Alumic project's entity graph into the engine, and hands authored content + engine-portable code to the engine's native asset and import pipelines.
+
+This chapter specifies the seam between SaaS Alumic and the engine. The plugin:
+
+- Authenticates to Alumic via a PAT ([ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)).
+- Pulls a project's entities via snapshot + incremental events ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)).
+- Fetches raw asset bytes into a content-addressed on-disk cache ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)).
+- Fetches pre-compiled engine-portable code artifacts from the marketplace ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side)).
+- Exposes a typed API inside the engine for game code to query entities and load assets.
+
+The plugin is **read-only** in Phase 4 (its initial release). Push-back — engine-native exports uploaded into Alumic — is a Phase 5+ extension.
+
+> This is different from **AlumicPlugin** (spec 03 / [ADR-007 Plugin identity lives in code via definePlugin()](/decisions/007-plugin-identity-in-code)), which is an in-app extension module. This chapter uses *engine plugin* exclusively to avoid confusion.
+
+## Phasing
+
+| Feature | Phase |
+|---|---|
+| Unity integration (first engine target) | 4 |
+| PAT auth + device-flow login wizard | 4 |
+| Project pull (snapshot + SSE/long-poll) | 4 |
+| Content-addressed asset cache | 4 |
+| Server-compiled C# artifacts consumed into Unity AssetDatabase | 4 |
+| Unreal (C++) integration | 4 (following Unity) |
+| Godot integration | 4 (following Unreal) |
+| Read-write (engine-native export upload) | 5+ |
+
+## Architecture
+
+```
+┌───────────────────────────┐        ┌──────────────────────────┐
+│   Alumic SaaS backend     │        │   User's game engine      │
+│                           │        │   (Unity / Unreal / Godot)│
+│  entity API ([Entity API](/reference/entity-api))          │  HTTPS │                          │
+│  asset API ([Asset Management](/reference/asset-management), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)) │◄───────┤  Alumic Engine Plugin    │
+│  artifacts ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side))      │        │                          │
+│  events stream ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol))   │        │  ┌──────────────────┐   │
+│                           │        │  │ Project Mirror    │   │
+└───────────────────────────┘        │  │ (SQLite, [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)) │   │
+                                     │  └──────────────────┘   │
+                                     │  ┌──────────────────┐   │
+                                     │  │ Asset Cache       │   │
+                                     │  │ (CAS by sha256)   │   │
+                                     │  └──────────────────┘   │
+                                     │  ┌──────────────────┐   │
+                                     │  │ Engine API        │   │
+                                     │  │ (C#/Blueprint/GD) │   │
+                                     │  └──────────────────┘   │
+                                     └──────────────────────────┘
+```
+
+Plugin state on disk (per bound Alumic project):
+
+```
+<ProjectRoot>/
+└── .alumic/
+    ├── binding.json          # projectId, workspaceId, backend URL, last cursor
+    ├── mirror.sqlite         # local entity + refs mirror ([ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log))
+    ├── assets/               # content-addressed asset cache
+    │   └── <first-2-of-sha>/
+    │       └── <full-sha>
+    └── artifacts/            # engine-portable code bundles
+        └── <plugin-id>/
+            └── <version>/
+                └── <target>/
+```
+
+## Setup and Binding
+
+The user installs the Alumic engine plugin package through their engine's normal mechanism (Unity Package Manager, Unreal plugin folder, Godot asset library). On first launch:
+
+1. **Login.** The plugin opens a device-flow URL in the user's browser. User logs in to alumic.app, approves, is redirected. The plugin polls until it receives a PAT with `project:read` + `asset:read` scope ([ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)).
+2. **Project binding.** The plugin queries `GET /api/workspaces` + `GET /api/workspaces/:id/projects`, presents a picker, writes the selection to `.alumic/binding.json`.
+3. **Initial pull.** The plugin performs a cold snapshot ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)) into `mirror.sqlite`, then subscribes to events.
+
+Subsequent launches read `binding.json`, resume from the stored cursor, and only re-pull the diff.
+
+## Pull Protocol
+
+### Cold snapshot
+
+```
+GET /api/projects/:pid/snapshot
+Accept: application/x-ndjson
+Authorization: Bearer <pat>
+X-Alumic-Schema-Version: <cached>
+```
+
+Server streams NDJSON — one JSON object per line, each an entity — then terminates with a cursor object:
+
+```
+{"type":"Character","id":"old-hermit","name":"Old Hermit","data":{...},"tags":[...],"version":7}
+{"type":"Dialogue","id":"intro","name":"Intro","data":{...},"tags":[],"version":3}
+...
+{"cursor":"018f8a10-..."}
+```
+
+Plugin writes each entity into `mirror.sqlite` keyed by `(id, version)`; records `cursor` in `binding.json`.
+
+### Incremental events
+
+Default transport is **long poll**:
+
+```
+GET /api/projects/:pid/events?since=<cursor>
+Accept: application/x-ndjson
+```
+
+Returns events and a new cursor when either enough events have accumulated or the 30s idle window elapses. Plugin applies events to the mirror and restarts the long poll with the new cursor.
+
+SSE is available via `?stream=sse` for environments where HTTP keep-alive is well-handled. Long poll is the default because corporate proxies strip SSE more often than not in engine IDE contexts.
+
+Event payloads:
+
+```json
+{ "event": "entity.updated", "entityId": "old-hermit", "type": "Character", "version": 8, "cursor": "018f..." }
+{ "event": "entity.deleted", "entityId": "orphan-1", "cursor": "018f..." }
+{ "event": "asset.committed", "assetId": "018f...", "sha256": "...", "cursor": "018f..." }
+{ "event": "schema.changed", "schemaVersion": "2026-04-21.1", "cursor": "018f..." }
+```
+
+### Offline and reconnect
+
+Per [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect):
+
+- The mirror is always readable. The engine continues operating against the last known state.
+- **Phase 4: read-only.** Authoring actions that would require a write are refused with "Offline — reconnect in alumic.app to make changes." No write queue in Phase 4 (matches the Phase-4 read-only scope declared in the Overview).
+- **Phase 5+:** engine-side writes land with the same `writeId` + `If-Match` outbox discipline as the browser ([ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect) §Engine plugin). Until then, writes happen through the browser or the `alumic` CLI.
+- On reconnect, the plugin catches up via `?since=<cursor>`. If the cursor is beyond the server's retention window (default 30 days), the plugin falls back to a cold snapshot.
+- The engine API surfaces a single `alumic.isOnline` flag plus `alumic.lastSyncAt` for game code that wants to display status.
+
+## Asset Caching
+
+Asset references in entity data are SHA-256-keyed; the plugin resolves them against the content-addressed cache:
+
+1. Lookup by `sha256` in `.alumic/assets/`. Cache hit → return bytes.
+2. Cache miss → `GET /api/projects/:pid/assets/:id/raw` with `If-None-Match: <sha256>`.
+3. Write bytes under `<first-2>/<full-sha>`; return.
+
+Garbage collection: on project close, the plugin walks the mirror's outbound asset refs and prunes unreferenced blobs older than 7 days.
+
+## Engine-Portable Artifacts
+
+Alumic's marketplace produces pre-compiled engine artifacts ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side)) for every published plugin/template, per engine target:
+
+```
+GET /api/artifacts/:pluginId/:version/:target    # target ∈ unity-csharp | unreal-cpp | godot-gdextension
+→ zip
+```
+
+The plugin unpacks these into engine-native locations:
+
+- **Unity:** `Assets/Alumic/Generated/<pluginId>@<version>/` — C# source + `.asmdef`. Unity's AssetDatabase picks them up on next import.
+- **Unreal:** `Plugins/Alumic/Generated/<pluginId>@<version>/` — header/source files + `.Build.cs`. UBT rebuilds on next project build.
+- **Godot:** `addons/alumic-generated/<pluginId>@<version>/` — GDScript / C# / GDExtension.
+
+Plugin-provided entity type schemas ([ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), [ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation)) drive the generation; user-authored components that use `FieldType` ([ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed)) become native structs.
+
+## Engine API Surface
+
+The plugin exposes a typed API to game code. Per engine:
+
+### Unity (C#)
+
+```csharp
+using Alumic;
+
+AlumicClient.Initialize();   // auto-called by [InitializeOnLoad]
+
+Character hermit = AlumicClient.Entities.Get<Character>("old-hermit");
+IReadOnlyList<Character> npcs = AlumicClient.Entities.ByType<Character>();
+Texture2D portrait = await AlumicClient.Assets.LoadTextureAsync(hermit.Data.Portrait);
+
+AlumicClient.Events.EntityUpdated += (evt) => {
+    if (evt.Type == "Dialogue") DialogueCache.Invalidate(evt.EntityId);
+};
+```
+
+### Unreal (C++)
+
+```cpp
+#include "AlumicClient.h"
+
+UAlumicClient* Client = UAlumicClient::Get(GetWorld());
+FAlumicCharacter Hermit = Client->Entities->Get<FAlumicCharacter>(TEXT("old-hermit"));
+UTexture2D* Portrait = Client->Assets->LoadTextureSync(Hermit.Portrait);
+```
+
+### Godot (GDScript)
+
+```gdscript
+var hermit = Alumic.entities.get("old-hermit")
+var portrait := Alumic.assets.load_texture(hermit.portrait)
+Alumic.events.entity_updated.connect(_on_entity_updated)
+```
+
+All three surfaces are code-generated from [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side) artifacts — game code sees plain native types, not JSON.
+
+### Why the engine API is synchronous while the browser API is async
+
+Spec 23 pins `EntityDatabase` on the browser side as async — every read crosses an HTTP boundary or goes through the Phase-1 shim. The engine API here is synchronous (`AlumicClient.Entities.Get<Character>(...)`, not `GetAsync`). The reason is the mirror: the plugin maintains `mirror.sqlite` as a full local read-cache ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)), so any `Get` / `ByType` call is a local SQLite lookup with no network. The browser has no equivalent persistent mirror — it runs the session-scoped `EntityCacheSubsystem` ([Entity Graph](/reference/entity-graph) Prefetch) for hot paths, and falls back to async fetches for cold reads. Both models converge on the same read-through pattern; only the cache locality differs.
+
+Writes stay asymmetric too: the browser PATCHes directly with `If-Match` ([ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)); the engine plugin is read-only in Phase 4 and defers push-back to `alumic push --from-engine` (Conflict Handling below).
+
+## Conflict Handling
+
+Read-only in Phase 4 means the plugin never PATCHes. When the engine's content pipeline or user tooling produces derived artifacts that should return to Alumic (baked scenes, thumbnail captures), the path is:
+
+- Phase 4: `alumic push --from-engine <path>` from the engine project root — explicit, manual, rate-limited per [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag). The flag uploads derived bytes as Asset entities via the standard two-step flow ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage): `POST /api/projects/:pid/assets` → PUT to pre-signed URL → `POST .../commit`) and writes any accompanying entity patches through the Entity API with `If-Match` ([ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)). The engine project resolves `projectId` from `.alumic/binding.json`; a `project:write` scope is required on the PAT ([ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)).
+- Phase 5+: a read-write plugin mode with its own conflict dialog ([ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape) shape), behind a setting.
+
+## Security
+
+- PATs are stored in the engine's secure credential store where available (Windows Credential Manager, macOS Keychain, libsecret), falling back to `binding.json` with 0600 permissions.
+- The plugin never executes bytes it fetches except via the engine's own import pipeline (Unity AssetDatabase, Unreal UBT, Godot asset import). Code artifacts are `.cs` / `.h` / `.gd` source files compiled by the engine's compiler, not loadable modules.
+- Plugin sandbox ([ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing)) does not apply inside the engine context — third-party content runs in the engine's compiler/runtime, and the user has accepted engine-level trust by installing the plugin. Signing of marketplace bundles ([ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing)) remains in place; the engine plugin verifies signatures before unpacking artifacts.
+
+## Event Channels (Alumic-side)
+
+Engine plugin activity surfaces on the Alumic-side event bus for observability:
+
+```typescript
+export const EnginePluginConnected = defineChannel<{
+  workspaceId: string; projectId: string; engineTarget: 'unity' | 'unreal' | 'godot'; pluginVersion: string;
+}>('EnginePlugin.Connected');
+export const EnginePluginSynced = defineChannel<{
+  projectId: string; entitiesApplied: number; cursor: string;
+}>('EnginePlugin.Synced');
+```
+
+These power per-workspace metering ([ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag)) and admin visibility into connected engine plugins.
+
+## Open Questions
+
+- **Per-scene entity scoping.** Large projects may not want to mirror every entity into the engine. A scoping mechanism (entity tag allowlist, scene-specific manifest) is deferred pending user feedback.
+- **Two-way editor integration.** Opening an Alumic entity from inside the engine (right-click → "Edit in alumic.app") requires a URL scheme handler. Deferred to Phase 4 follow-up work.

@@ -1,0 +1,34 @@
+---
+title: "ADR-005: Bun workspaces as the monorepo tool"
+description: "Alumic uses Bun workspaces."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The research brief (`Alumic Architecture — an opinionated research brief.pdf`) recommended pnpm + Turborepo — a well-established TypeScript monorepo setup with strong caching, parallel build support, and mature CI integration.
+
+The spec silently adopted **Bun workspaces** instead. The audit flagged this as an undocumented cross-corpus drift.
+
+The real reason for Bun is downstream: **Electrobun**. Alumic's desktop distribution (Electrobun-based native shell, ~6 MB bundle, driven by a Bun runtime) keeps the toolchain consistent if Bun is the runtime from dev through production. Switching monorepo tools would force a Bun-aware packaging step on top of Turborepo, effectively doubling the build story.
+
+Bun workspaces also provide native TypeScript, a built-in test runner, a fast installer, and `workspace:*` semantics equivalent to pnpm's. Turborepo-style incremental caching isn't free but is replaceable with `bun run --filter` pipelines and external caching (Nx Cloud or simple content-addressable build outputs) if scale demands it.
+
+## Decision
+
+Alumic uses Bun workspaces. Root `package.json` declares `"workspaces": ["packages/*", "templates/*", "tools/*"]`. `workspace:*` is the protocol for intra-repo dependencies. No Turborepo, no pnpm.
+
+## Consequences
+
+**Enables:** Single-runtime story from dev to Electrobun packaging. Fewer moving parts. Native TS execution without a bundler in dev.
+
+**Obligates:** No built-in Turborepo-style task graph. Cross-package rebuild ordering is expressed via TypeScript project references (`tsc -b`) or `bun run --filter` scripts. If build times become painful, add caching via Nx-style external tooling before reconsidering Turborepo.
+
+**Forecloses:** The pnpm+Turborepo cache story. Contributors familiar with Turborepo-shaped pipelines will find nothing to carry over.
+
+## Related
+
+- Specs: [Project Structure](/guides/project-structure)
+- Findings resolved: audit-1 A1.

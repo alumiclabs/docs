@@ -1,0 +1,57 @@
+---
+title: "ADR-032: Entities carry a version log; history is append-only"
+description: "Every entity write appends to `entity_versions`:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab) introduced a `version` field for optimistic concurrency. [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol) relies on an opaque monotonic cursor for incremental sync. [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first) promises "live rebalancing via entity edits" — which implies a revert story. These three use cases share a substrate: an append-only entity history.
+
+A Git-shaped branch/merge model is out of scope ([ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab) defers to Phase 5+). What's needed now is a linear version log per entity + a global monotonic sequence.
+
+## Decision
+
+Every entity write appends to `entity_versions`:
+
+| Column | Purpose |
+|--------|---------|
+| `lsn` | Monotonic bigserial — the global sync cursor |
+| `entity_id` | Which entity |
+| `version` | Per-entity monotonic `int` (starts at 1) |
+| `data` | Full `data` at this version |
+| `editor_metadata` | Full `editor_metadata` at this version |
+| `written_by` | User ID (retained; = `on_behalf_of_user_id` for agent writes — [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model)) |
+| `actor_id` | Canonical author ID — User or Agent ([ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model)) |
+| `agent_run_id` | AgentRun this write belongs to; null for human writes ([ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model)) |
+| `on_behalf_of_user_id` | For agent writes, the accountable human; null for human writes |
+| `written_via` | `browser` \| `plugin` \| `cli` \| `agent` \| `import` ([ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model) extended) |
+| `written_at` | Timestamp |
+| `write_id` | Idempotency key ([ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect)) |
+
+The current state of each entity is a materialized view (`entities` table holds the latest row for fast reads). `lsn` is the cursor clients persist for sync ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)).
+
+Public API:
+
+- `GET /api/entities/:id/versions?limit=50&before=<version>` — paginated list
+- `GET /api/entities/:id/versions/:version` — the full entity at that version
+- `POST /api/entities/:id/revert` with `{ toVersion: N }` — writes a new version equal to version N's data; the `revert` is itself a version, not a delete
+- `POST /api/projects/:pid/agent-runs/:id/revert` — reverts every write whose `agent_run_id` matches, in reverse chronological order ([ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model), spec/28)
+
+Retention: 30 days by default for workspace tiers; indefinite for paid tiers. Beyond retention, the `entity_versions` tail is pruned but the current `entities` row and the LSN sequence are preserved.
+
+## Consequences
+
+**Enables:** Revert. Incremental sync ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)). Auditing (who changed what, when). A foundation for future named-version / release-cut features without rewriting persistence.
+
+**Obligates:** Writes cost one row in `entity_versions` in addition to the `entities` update. Storage planning accounts for this. Every write carries a `write_id` so replays dedupe.
+
+**Forecloses:** In-place mutation of history. Corrections happen by forward writes (revert, or a new write) — not by editing past rows.
+
+## Related
+
+- Specs: [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [Engine Plugin](/platform/engine-plugin), [Actors and Agents](/reference/actors-and-agents)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab).
+- Informs: [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect), [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model) (actor columns), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals) (accepted proposals land here as forward writes).

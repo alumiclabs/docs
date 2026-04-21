@@ -1,0 +1,333 @@
+---
+title: "Event Bus"
+description: "Typed Observable channels with hierarchical tag dispatch; synchronous."
+icon: "bolt-lightning"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-009 Event bus is strictly synchronous](/decisions/009-synchronous-event-bus)
+</Info>
+
+## Overview
+
+The event bus provides **typed, tag-addressed publish/subscribe communication** between plugins and systems. It is the primary mechanism for decoupled inter-system communication — a dialogue system doesn't need to import the combat system; it just emits a `DialogueEnded` event and any listener responds.
+
+> **The bus is strictly synchronous.** `emit()` calls every matching handler inline and returns before the next statement runs. There is no deferred-channel primitive, no per-phase event queue, and no "event flush" step in PostUpdate. Game code that needs to batch events buffers them itself (see *Event Buffering* below). See [ADR-009 Event bus is strictly synchronous](/decisions/009-synchronous-event-bus).
+
+## Core Concepts
+
+### Observable<T>
+
+The foundational building block. A lightweight synchronous observable that holds an array of handlers.
+
+```typescript
+export interface Observable<T> {
+  /**
+   * Subscribe to values. Returns a Disposable to unsubscribe.
+   * Handlers are called in registration order.
+   */
+  subscribe(handler: (value: T) => void): Disposable;
+
+  /** Emit a value synchronously to all current subscribers. */
+  next(value: T): void;
+
+  /** Number of active subscribers. */
+  readonly count: number;
+
+  /** Remove all subscribers. */
+  clear(): void;
+}
+
+/**
+ * Create a new Observable.
+ *
+ * @example
+ * const onDamage = createObservable<{ amount: number }>();
+ * const unsub = onDamage.subscribe((e) => console.log(e.amount));
+ * onDamage.next({ amount: 25 }); // logs: 25
+ * unsub(); // unsubscribes
+ */
+export function createObservable<T>(): Observable<T>;
+```
+
+**Implementation notes:**
+- Handlers are stored in a plain array
+- `next()` iterates the array synchronously — no microtask deferral, no Promise wrapping
+- Removing a handler during iteration is safe (use a copy-on-iterate strategy or mark-and-sweep)
+- `subscribe()` returns a `Disposable` (a `() => void` function) for cleanup
+
+### Channel<T>
+
+A typed event channel bound to a tag. Channels are defined statically and imported by any package that needs to emit or subscribe.
+
+```typescript
+export interface Channel<T> {
+  /** The tag this channel is bound to. */
+  readonly tag: Tag;
+
+  /** The channel name (derived from tag). */
+  readonly name: string;
+
+  /**
+   * Subscribe to events on this channel.
+   * Also receives events from child tags (hierarchical dispatch).
+   */
+  on(handler: (event: T) => void): Disposable;
+
+  /**
+   * Emit an event on this channel.
+   * Delivered synchronously to all subscribers on this tag and ancestor tags.
+   */
+  emit(event: T): void;
+}
+```
+
+### defineChannel
+
+```typescript
+/**
+ * Define a typed event channel.
+ *
+ * @typeParam T - The event payload type
+ * @param tag - A dot-separated tag path (e.g., 'Combat.Damage.Dealt')
+ * @returns A Channel<T> that can be imported and used from any package
+ *
+ * @example
+ * // In @alumic/combat
+ * export const DamageDealt = defineChannel<{
+ *   source: string;
+ *   target: string;
+ *   amount: number;
+ *   damageType: 'physical' | 'magical';
+ * }>('Combat.Damage.Dealt');
+ *
+ * // In @alumic/health
+ * import { DamageDealt } from '@alumic/combat';
+ * DamageDealt.on((e) => applyDamage(e.target, e.amount));
+ *
+ * // In @alumic/ui
+ * import { DamageDealt } from '@alumic/combat';
+ * DamageDealt.on((e) => showDamageNumber(e.target, e.amount));
+ */
+export function defineChannel<T>(tag: string): Channel<T>;
+// Channel tags are validated by defineTag's rules (see [Tag Registry](/reference/tag-registry)) —
+// defineChannel interns the tag via defineTag internally.
+```
+
+## EventBus
+
+The `EventBus` is the central routing hub owned by the `App`. It manages all channel subscriptions and handles hierarchical dispatch.
+
+```typescript
+export interface EventBus {
+  /**
+   * Subscribe to events matching a tag (hierarchical).
+   * Subscribing to 'Combat' will receive events from
+   * 'Combat.Damage.Dealt', 'Combat.Damage.Blocked', etc.
+   */
+  on<T>(tag: string, handler: (event: T) => void): Disposable;
+
+  /**
+   * Emit an event at a specific tag.
+   * Delivered to handlers subscribed to this tag
+   * AND to handlers subscribed to any ancestor tag.
+   */
+  emit<T>(tag: string, event: T): void;
+
+  /**
+   * Get the underlying observable for a specific tag.
+   * Creates one if it doesn't exist.
+   */
+  observable<T>(tag: string): Observable<T>;
+
+  /** Remove all subscriptions across all tags. */
+  clear(): void;
+
+  /** Number of active subscriptions across all tags. */
+  readonly totalSubscriptions: number;
+}
+
+/** Create a new EventBus instance with a TagRegistry for hierarchical dispatch. */
+export function createEventBus(tags: TagRegistry): EventBus;
+```
+
+## Hierarchical Dispatch
+
+The event bus integrates with the tag registry to support hierarchical event routing. When an event is emitted on a child tag, it is also delivered to handlers subscribed to ancestor tags.
+
+### Example
+
+```typescript
+// Define channels at different levels of the hierarchy
+const Combat       = defineChannel<any>('Combat');
+const CombatDamage = defineChannel<any>('Combat.Damage');
+const DamageDealt  = defineChannel<{ amount: number }>('Combat.Damage.Dealt');
+const DamageBlocked = defineChannel<{ amount: number }>('Combat.Damage.Blocked');
+
+// Subscribe at different levels
+Combat.on((e) => console.log('Any combat event'));       // catches everything
+CombatDamage.on((e) => console.log('Any damage event')); // catches Dealt + Blocked
+DamageDealt.on((e) => console.log('Damage dealt'));       // catches only Dealt
+
+// Emit at the leaf level
+DamageDealt.emit({ amount: 25 });
+// Output:
+//   "Damage dealt"        ← DamageDealt handler
+//   "Any damage event"    ← CombatDamage handler (ancestor)
+//   "Any combat event"    ← Combat handler (ancestor)
+```
+
+### Dispatch Order
+
+When an event is emitted:
+1. First, handlers on the **exact tag** are called (in registration order)
+2. Then, handlers on the **parent tag** are called
+3. Then, handlers on the **grandparent tag**, and so on up to the root
+
+This bottom-up dispatch ensures that specific handlers run before general ones.
+
+## Channel Scoping
+
+Channels are defined as module-level constants (e.g., `export const DamageDealt = defineChannel<...>(...)`), but they must route through the **current App's EventBus**. This is handled via a module-level binding:
+
+```typescript
+// Internal implementation sketch
+let currentBus: EventBus | null = null;
+
+export function setCurrentBus(bus: EventBus | null) {
+  currentBus = bus;
+}
+
+export function defineChannel<T>(tagPath: string): Channel<T> {
+  const tag = defineTag(tagPath);
+  return {
+    tag,
+    name: tagPath,
+    on(handler) {
+      if (!currentBus) throw new Error('No active App — cannot subscribe');
+      return currentBus.on(tagPath, handler);
+    },
+    emit(event) {
+      if (!currentBus) throw new Error('No active App — cannot emit');
+      currentBus.emit(tagPath, event);
+    },
+  };
+}
+```
+
+The `App` sets the current bus during `boot()` and clears it during `shutdown()`.
+
+**Implication:** Only one `App` can be active per JavaScript context. This is acceptable because:
+- In production, there's always exactly one App per browser tab (one user session = one App).
+- In tests, each test creates and shuts down its own App sequentially.
+- In the editor's live game-preview feature, the preview runs in an `<iframe>` (separate JS context) so the editor's App and the preview's App coexist without sharing the `currentBus`.
+
+## Design Rationale
+
+### Why Synchronous?
+
+The event bus is synchronous — `emit()` calls all handlers inline before returning. This is critical for game frameworks:
+
+1. **Predictable frame ordering.** Events emitted during PreUpdate are fully processed before Update begins. No microtask deferral means no events "leaking" across phases.
+
+2. **No callback hell.** Game logic is already complex enough. Adding async event handling would require developers to reason about execution order across tick boundaries.
+
+3. **Performance.** Synchronous dispatch avoids Promise allocation overhead. In a 60fps game, every microsecond counts.
+
+### Why Tags Instead of String Constants?
+
+Tags provide:
+- **Hierarchical dispatch** — subscribe to a category and receive all events within it
+- **Discoverability** — query the tag registry to find all registered channels
+- **Redirectors** — alias tags without changing emitters
+- **Type safety** — tags are branded strings that prevent typos
+
+### Why Not an Event Emitter Class?
+
+Traditional event emitters (`emitter.on('event', handler)`) have two problems:
+1. No type safety — the event name is a plain string
+2. No hierarchical dispatch — you must subscribe to each event individually
+
+Alumic's `defineChannel<T>` provides compile-time type checking on the payload, and the tag system provides hierarchical subscription.
+
+## Common Patterns
+
+### One-Shot Subscription
+
+```typescript
+// Subscribe to the next event only, then auto-unsubscribe
+function once<T>(channel: Channel<T>, handler: (event: T) => void): Disposable {
+  const unsub = channel.on((event) => {
+    unsub();
+    handler(event);
+  });
+  return unsub;
+}
+```
+
+### Event Buffering
+
+```typescript
+// Collect events during a frame and process them at the end
+const damageBuffer: DamageEvent[] = [];
+
+DamageDealt.on((e) => damageBuffer.push(e));
+
+// In a PostUpdate system:
+function processDamageBuffer(tick: TickContext) {
+  for (const e of damageBuffer) {
+    applyDamage(e.target, e.amount);
+  }
+  damageBuffer.length = 0;
+}
+```
+
+### Conditional Dispatch
+
+```typescript
+// Only handle events that meet a condition
+DamageDealt.on((e) => {
+  if (e.damageType === 'magical') {
+    applyMagicResistance(e.target, e.amount);
+  }
+});
+```
+
+### Cross-System Communication
+
+```typescript
+// @alumic/dialogue emits when a choice is made
+export const ChoiceMade = defineChannel<{
+  graphId: string;
+  nodeId: string;
+  choiceIndex: number;
+  choiceText: string;
+}>('Dialogue.ChoiceMade');
+
+// @alumic/quest subscribes without importing @alumic/dialogue
+import { ChoiceMade } from '@alumic/dialogue';
+ChoiceMade.on((e) => {
+  if (e.choiceText === 'Accept the quest') {
+    startQuest('tutorial-quest');
+  }
+});
+```
+
+## Performance Considerations
+
+### Subscription Count
+
+For Phase 1 with <100 channels and <1000 subscriptions total, a linear scan through handlers is sufficient. The bus stores handlers in a `Map<string, Array<Handler>>` keyed by tag path.
+
+### Hierarchical Lookup
+
+When emitting at tag `A.B.C`, the bus must also deliver to handlers at `A.B` and `A`. This requires walking up the tag hierarchy. Options:
+
+1. **On emit (eager):** Walk ancestors on each emit. O(depth) per emit, but depth is typically 2-4.
+2. **On subscribe (precomputed):** When subscribing to `A.B`, register the handler for all current and future tags matching `A.B.*`. More complex, but O(1) per emit.
+
+Phase 1 uses option 1 (eager). If profiling shows hot-path emit is a bottleneck, option 2 can be implemented without changing the public API.
+
+### Memory
+
+Each subscription holds a reference to the handler function. Unsubscribing (calling the `Disposable`) removes the reference. Channels that are defined but never subscribed to consume zero memory.

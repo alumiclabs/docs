@@ -1,0 +1,36 @@
+---
+title: "ADR-014: Layout/editor metadata is a separate entity field; runtime API omits it"
+description: "Every entity carries two fields: `data` (runtime-relevant, validated against the entity type's schema) and `editor_metadata` (layout, comments, viewport, presentation-only, **not** validated for game "
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The file-oriented spec pre-SaaS separated `.graph.json` (runtime) from `.layout.json` (editor-only: node positions, viewport, colors, comments). The audit flagged that nothing enforced the runtime/editor split for shipped builds — a Vite bundle would ship `.layout.json` sidecars as dead weight.
+
+Under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)), the file-level split becomes an API-level split.
+
+## Decision
+
+Every entity carries two fields: `data` (runtime-relevant, validated against the entity type's schema) and `editor_metadata` (layout, comments, viewport, presentation-only, **not** validated for game semantics). The two are stored on the same entity row but served through different API endpoints:
+
+- `GET /api/entities/:id` — runtime view, returns `{ id, type, name, tags, data }`. Used by the game client.
+- `GET /api/entities/:id?include=editor` — editor view, returns the same plus `editor_metadata`. Used by the editor.
+
+File export emits `.entity.json` + optional `.layout.json` sidecar — the split surface when round-tripping to files. File import reads both if present.
+
+## Consequences
+
+**Enables:** Zero ceremony for clients. The runtime never sees editor metadata; there is nothing to strip. Editors fetch the richer view explicitly when they need it. Bandwidth usage on the player-facing API stays minimal.
+
+**Obligates:** Every entity type must declare its editor_metadata schema (even if empty). The reverse index ([ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api)) ignores editor_metadata — references live only in `data`.
+
+**Forecloses:** Mixing runtime and editor concerns inside a single field. An entity's display color in the canvas browser, for example, goes in `editor_metadata`, not `data` — even if it feels like "properties of the entity".
+
+## Related
+
+- Specs: [Data Formats](/reference/data-formats), [Canvas and Workspace](/reference/canvas-and-workspace), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database)
+- Findings resolved: audit-2 #13 (partial).
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation).

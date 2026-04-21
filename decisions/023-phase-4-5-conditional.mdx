@@ -1,0 +1,42 @@
+---
+title: "ADR-023: Phases 4 and 5 are conditional on adoption"
+description: "Alumic is considered **feature-complete when Phase 3 verification passes**."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The roadmap ([Roadmap](/concepts/roadmap)) lists five phases:
+
+- Phase 1: Kernel + first template (6-8 weeks).
+- Phase 2: ECS + assets + state + save (8-10 weeks).
+- Phase 3: Flow + ability + dialogue + multiplayer (4-6 weeks).
+- Phase 4: Editor, canvas, UI designer, vector editor (ongoing).
+- Phase 5: bitECS + WebGPU + Rust/WASM (as needed).
+
+Phase 4 is "ongoing" and Phase 5 is "as needed" — but nothing in the spec says whether they are committed deliverables or conditional investments. A reader plans around "Phase 5 is coming" or "Phase 5 will never ship" without a clear signal.
+
+## Decision
+
+Alumic is considered **feature-complete when Phase 3 verification passes**. Phases 4 and 5 are **opt-in investments**, shipped incrementally based on adoption signal:
+
+- **Phase 4** (editor + creative tools + marketplace) ships if there is clear demand for visual authoring. Milestones are incremental — one creative tool at a time, each verified independently. Risk: teams adopting Alumic for Phase 1-3 features get editors they didn't need. Acceptance: editor mode can be disabled with zero cost in pure-runtime deployments.
+
+- **Phase 5** (advanced backends: bitECS, WebGPU, Rust/WASM, server-authoritative multiplayer, CRDT collab) ships in response to specific performance or capability needs. If no adopter hits those ceilings, Phase 5 may never ship. Each Phase 5 deliverable has its own "done when" criterion when it enters the queue.
+
+The roadmap's Risk Mitigation section documents this stance explicitly.
+
+## Consequences
+
+**Enables:** Flexibility to respond to real signal rather than committing to features speculatively. MVP discipline — ship what the market needs, not what the research suggested.
+
+**Obligates:** The spec must be explicit that Phase 1-3 is the committed scope. Marketing and community comms must not over-promise Phase 4/5. Early adopters know what they're buying into.
+
+**Forecloses:** A rigid "we will ship all five phases" roadmap. Engineering capacity in year two goes where demand points.
+
+## Related
+
+- Specs: [Roadmap](/concepts/roadmap)
+- Findings resolved: audit-2 #19.

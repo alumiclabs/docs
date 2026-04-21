@@ -1,0 +1,55 @@
+---
+title: "ADR-025: Project identity is a server-issued UUID"
+description: "Project identity is a **server-issued UUID**."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Pre-audit, the spec treated projects as directories on disk (`my-game/`, `data/entities/...`). Chapter 23 named a `project_id` column without saying where it came from. Chapter 24 accepted a `ProjectHandle` without defining its shape. CLI scaffolding (`alumic create my-game --template topdown-action`) produced a named directory with no identity.
+
+Under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)), a project is a row owned by a workspace, not a path. Path-as-identity leaks into asset URLs, CLI auth, engine-plugin token scoping, and file export. Every function that takes an opaque project string has to decide if it means a UUID or a directory.
+
+## Decision
+
+Project identity is a **server-issued UUID**. A `ProjectHandle` is:
+
+```ts
+export interface ProjectHandle {
+  readonly id: string;         // UUID minted by the backend
+  readonly name: string;       // user-facing display name
+  readonly workspaceId: string; // owning workspace
+  readonly createdAt: string;
+}
+```
+
+File-exported projects carry a `project.json` at their root that stamps the UUID:
+
+```json
+{
+  "$format": "alumic-project",
+  "$version": 1,
+  "id": "0b7e5f1c-3e8a-4a3a-9a5e-1f9b7c4b8d21",
+  "name": "Forest Game",
+  "workspaceId": "01HR0K...",
+  "createdAt": "2026-04-20T12:00:00.000Z"
+}
+```
+
+CLI `alumic create` ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)) mints the UUID on the server first, then writes `project.json`. `alumic push` on an anonymous directory mints a UUID and stamps the directory.
+
+## Consequences
+
+**Enables:** One identity model across SaaS, on-prem, CLI, and engine plugin. Asset URLs, scoped tokens, metering, and permissions all key on `projectId`. File export round-trips without identity loss.
+
+**Obligates:** CLI commands require a server round-trip (online scaffolding) or an explicit `--offline` flag that defers UUID minting to first push. The engine plugin reads `projectId` from `project.json` or from its configured workspace binding.
+
+**Forecloses:** Treating a directory name as an identifier. Two directories with the same name but different UUIDs are different projects.
+
+## Related
+
+- Specs: [Project Structure](/guides/project-structure), [Template System](/reference/template-system), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [Navigation and Shell](/reference/navigation-shell), [Undo and History](/reference/undo-history), [Permissions](/reference/permissions)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first).
+- Informs: [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware).

@@ -1,0 +1,37 @@
+---
+title: "ADR-015: Canvas persistence goes through the entity database"
+description: "`CanvasBoard` is an entity type like `Character`, `Dialogue`, `Scene`."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Chapter 22 ([Canvas and Workspace](/reference/canvas-and-workspace)) described the canvas state as "persisted as a single document" — but named no file format, directory, or write mechanism. Chapter 15 ([Save System](/reference/save-system)) explicitly does not cover canvas state (canvases are authored content, not runtime save state). Chapter 23 ([Entity Graph](/reference/entity-graph)) lists `CanvasBoard` as an entity type but didn't pin the on-disk/on-backend format.
+
+Under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)), the answer is clean: the canvas is an entity, so it persists the way every entity persists.
+
+## Decision
+
+`CanvasBoard` is an entity type like `Character`, `Dialogue`, `Scene`. Its `data` field holds `{ viewport, nodes, connections, groups }`; its `editor_metadata` field ([ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field)) holds presentation preferences (grid snap, last-used tool). Canvas nodes that reference other entities do so via `EntityRef` with roles like `node`, `portalTarget`, `annotatedBy`.
+
+Persistence uses the standard entity API:
+- **SaaS:** POST/PATCH `/api/entities/canvasboard/:id`.
+- **On-prem/export:** `<id>.entity.json` in `data/entities/canvases/`.
+
+Canvas state is never part of player save slots — it is authoring data, same tier as characters and dialogues.
+
+## Consequences
+
+**Enables:** Uniform persistence. Undo (session-scoped `UndoSubsystem`) treats canvas edits the same as any other entity edit. Backlinks work automatically — "which canvas boards reference this character?" is already answered by the entity graph. Multi-canvas workflows are free.
+
+**Obligates:** The canvas editor produces entity writes on save, not file writes. Large boards (hundreds of nodes) stress the entity write path — batched or debounced saves become necessary.
+
+**Forecloses:** A bespoke canvas-persistence path (separate `.canvas.json` format, custom directory). The canvas integrates into the entity browser, marketplace export, and sync layers without special-casing.
+
+## Related
+
+- Specs: [Save System](/reference/save-system), [Canvas and Workspace](/reference/canvas-and-workspace), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database)
+- Findings resolved: audit-1 B3.
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field).

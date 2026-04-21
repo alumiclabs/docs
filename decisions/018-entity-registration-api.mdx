@@ -1,0 +1,49 @@
+---
+title: "ADR-018: Entity-type and extractor registration via ctx.entities"
+description: "`AppContext` gains an `entities` namespace and an `editors` namespace:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Chapter 23 ([Entity Graph](/reference/entity-graph)) declares that plugins can register custom entity types and reference extractors. Chapter 24 ([Navigation and Shell](/reference/navigation-shell)) declares plugins register custom editor surfaces. But `AppContext` (from chapter 4) exposes only `bus`, `scheduler`, `tags`, `subsystem`, `get`, `schedule`, `insertResource`, `getResource`. No registration entry points for entities or editors existed.
+
+Plugin authors had no way to do what chapters 23/24 said plugins do.
+
+## Decision
+
+`AppContext` gains an `entities` namespace and an `editors` namespace:
+
+```ts
+interface AppContext {
+  // ... existing
+  readonly entities: {
+    registerType(type: EntityType<any>): Disposable;
+    registerExtractor(typeName: string, extractor: RefExtractor<any>): Disposable;
+  };
+  readonly editors: {
+    register(surface: EditorSurface): Disposable;
+  };
+  readonly variables: VariableRegistry;  // see [ADR-017 Shared VariableRegistry in @alumic/core](/decisions/017-shared-variable-registry)
+}
+```
+
+**Collision policy:** Registering a duplicate entity-type name, a second extractor for the same type, or a second editor surface for the same entity type throws a clear error naming both the existing and the attempted registration. Silent override would make plugin conflicts invisible.
+
+Plugins call these from `build(ctx)`. Returned `Disposable` is collected by the kernel and called on shutdown.
+
+## Consequences
+
+**Enables:** Entity-type plugins, extractor plugins, and custom editor surfaces are first-class extension mechanisms. Two independent plugins can coexist cleanly, and conflicts surface early.
+
+**Obligates:** Chapter 4 must document the new AppContext fields. Chapters 23 and 24 cross-reference back.
+
+**Forecloses:** Module-level register-on-import side effects. Registration is always explicit, scoped to the plugin's lifecycle.
+
+## Related
+
+- Specs: [Plugin System](/reference/plugin-system), [Writing a Plugin](/guides/writing-a-plugin), [App Lifecycle](/reference/app-lifecycle), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [Navigation and Shell](/reference/navigation-shell), [Undo and History](/reference/undo-history)
+- Findings resolved: audit-1 B4; audit-2 #05, #07.
+- Depends on: [ADR-011 Disposable is a bare cleanup function](/decisions/011-disposable-shape).

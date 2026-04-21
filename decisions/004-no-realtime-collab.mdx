@@ -1,0 +1,34 @@
+---
+title: "ADR-004: No real-time collaboration in Phase 1-4"
+description: "Entity edits use **optimistic concurrency** with a `version` or `updated_at` field."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)) and team features ([ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing)) make multi-user collaboration imaginable: two designers editing the same dialogue graph, a writer and a narrative director open in the same lore document. Figma-style multi-cursor is the obvious feature.
+
+Delivering it well requires CRDT or OT infrastructure (Yjs, Loro, Automerge), conflict-free replication of every entity type, presence indicators, and awareness propagation. That is a multi-month investment. A half-delivered version — "it mostly works except when it doesn't" — burns team trust on shared authoring far worse than serialization with clear conflict handling.
+
+Meanwhile, teams using Alumic for narrative or game-design work can coordinate via existing tools (Slack, Git-like branching, last-write-wins with deliberate hand-offs). Real-time is a feature want, not a foundational need, in Phase 1-4.
+
+## Decision
+
+Entity edits use **optimistic concurrency** with a `version` or `updated_at` field. The API rejects stale writes with a conflict error that the client surfaces. No live multi-cursor, no CRDTs, no operational transform in Phase 1-4.
+
+Real-time collab is a Phase 5+ consideration, evaluated on signal from actual team users. If adopted, it should layer on top of the existing entity API (most likely via Yjs or Loro, writing snapshots to Postgres on quiet).
+
+## Consequences
+
+**Enables:** Simple, well-understood persistence semantics. Every write is a discrete transaction. Undo (ADR — session-scoped UndoSubsystem) remains straightforward.
+
+**Forecloses:** Live co-authoring for Phase 1-4. Teams accept that two people editing the same entity will see a conflict dialog, not seamless merge.
+
+**Obligates:** The API must return clear conflict errors and the editor UI must handle them gracefully (show both versions, let the user pick).
+
+## Related
+
+- Specs: [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [Navigation and Shell](/reference/navigation-shell), [Undo and History](/reference/undo-history)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing).

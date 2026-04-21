@@ -1,0 +1,53 @@
+---
+title: "ADR-036: Every backend request carries a workspace tag for metering"
+description: "Every backend request resolves a `workspaceId` in middleware — from the PAT (ADR-026), from the session JWT's workspace claim, or from the URL path (`/api/workspaces/:id/...`)."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first) commits to SaaS as the primary revenue path; no ADR or spec describes how usage is measured. Phase 2 ships the backend; absent a metering hook, a paid tier cannot be enforced and abuse cannot be rate-limited.
+
+Retrofitting per-workspace tagging onto a matured API is painful. Putting it in from day one is cheap.
+
+## Decision
+
+Every backend request resolves a `workspaceId` in middleware — from the PAT ([ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)), from the session JWT's workspace claim, or from the URL path (`/api/workspaces/:id/...`). Handlers receive `req.ctx = { userId, workspaceId, projectId?, clientKind }`.
+
+Three middlewares attach at the router root:
+
+1. **Quota** — checks the workspace's plan against per-resource limits (entities/project, storage bytes, monthly asset egress, monthly write count). Over-quota returns `402 Payment Required` with `{ limit, current, plan }`.
+2. **Rate-limit** — per-workspace token bucket on write endpoints; stricter per-PAT bucket on top.
+3. **Meter** — records `(workspaceId, actorId, agentRunId, route, bytesIn, bytesOut, durationMs, costUsd?)` to an events table drained periodically to analytics / billing. The `actor_id` dimension ([ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model)) enables per-agent cost visibility and per-run cost rollup — an `AgentRun`'s `costUsd` is the sum of its events' `costUsd`, surfaced in the AgentRun spec-sheet (spec/28).
+
+Free tier limits are defined in a config table and returned from `GET /api/workspaces/:id/plan`; clients use this to surface "80% of your quota used" warnings.
+
+Phase gating:
+- **Phase 2:** middleware present, meter writes events, quotas are "log-only" (no enforcement).
+- **Phase 3:** quotas enforced for writes; soft warnings on reads.
+- **Phase 4:** billing integration (Stripe), plan changes live.
+
+## Consequences
+
+**Enables:** A SaaS business model. Fair-use enforcement. Per-workspace observability (which workspace is driving load). On-prem uses the same middleware with quotas disabled by config.
+
+**Obligates:** Every handler that doesn't trivially scope by URL must resolve `workspaceId` explicitly. Handlers that aggregate across workspaces (admin endpoints) use a separate, audit-logged router. The meter events table needs retention and a drain pipeline.
+
+**Forecloses:** "Untagged" endpoints outside admin. `GET /api/schema` is tagged by the caller's workspace (schemas can vary by installed marketplace plugins — [ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation)).
+
+### Workspace-less routes
+
+A small set of routes legitimately cannot resolve a workspace:
+
+- **Unauthenticated public reads** — `GET /api/marketplace/templates`, `GET /api/marketplace/plugins` (browse without an account). These meter against a synthetic `workspaceId = 'public'` row for rate-limit purposes and are quota-exempt.
+- **Identity bootstrap** — `POST /api/auth/login`, `POST /api/auth/refresh`, `GET /api/me`. These carry no workspace scope before the user picks one; they meter against `userId` only and are exempt from workspace quotas.
+
+All other routes must resolve a concrete `workspaceId` or return `400 { error: "workspace-required" }`.
+
+## Related
+
+- Specs: [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints), [Permissions](/reference/permissions)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth).
+- Informs: Phase 4 billing scope.

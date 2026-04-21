@@ -1,0 +1,18 @@
+export const DecisionsBlock = ({ children }) => (
+  <Info>
+    **Decisions shaping this page:** {children}
+  </Info>
+);
+
+{/*
+  Usage (inline inside a spec page):
+
+    import { DecisionsBlock } from '/snippets/decisions-block.mdx';
+
+    <DecisionsBlock>
+      [ADR-001 SaaS-first](/decisions/001-saas-first), [ADR-013 Server-side validation](/decisions/013-server-side-validation)
+    </DecisionsBlock>
+
+  The style is one edit here if the team wants to switch callout weight
+  (Info -> Note, Note -> Accordion collapsed, etc.).
+*/}

@@ -1,0 +1,306 @@
+---
+title: "Asset Management"
+description: "Content-addressed blobs, signed URLs, bundles, loaders."
+icon: "image"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)
+</Info>
+
+## Overview
+
+`@alumic/assets` manages binary assets (textures, models, audio, fonts, SVGs, spritesheets) as **server-owned, content-addressed blobs** fronted by signed URLs and cached client-side by content hash. The package provides:
+
+- A uniform `AssetHandle<T>` that loaders consume regardless of transport.
+- Bundle-tagged deferred loading for scene-level batching.
+- Pluggable loaders per asset type (texture → `THREE.Texture`, model → `THREE.Group`, etc.).
+- Transparent signed-URL refresh and SHA-256 cache validation.
+
+> **SaaS-first.** Under [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first) / [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), binary assets live in object storage (S3-compatible for hosted/on-prem, local MinIO for desktop). Clients never read bytes from a filesystem path; browsers request signed URLs via `GET /api/projects/:pid/assets/:id`, the engine plugin pulls raw bytes via `GET /api/projects/:pid/assets/:id/raw`. In Phase 1 ([ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim)) the same interface is served by an in-memory shim.
+
+## Core Types
+
+### AssetHandle
+
+```typescript
+export interface AssetHandle<T = unknown> {
+  /** Asset entity ID (UUID). Resolved against the project's asset table. */
+  readonly id: string;
+
+  /** Asset kind — determines which loader runs. */
+  readonly kind: 'texture' | 'model' | 'audio' | 'font' | 'svg' | 'generic';
+
+  /** MIME type. */
+  readonly contentType: string;
+
+  /** Content hash (SHA-256, hex). Stable across re-uploads — the cache key. */
+  readonly sha256: string;
+
+  /** Uncompressed byte length. */
+  readonly byteLength: number;
+
+  /** Bundle tag for grouped loading (e.g., 'Level.Forest'). */
+  readonly bundle?: string;
+
+  /** Loading state. */
+  readonly state: 'unloaded' | 'loading' | 'loaded' | 'error';
+
+  /** The loaded asset data (undefined until loaded). */
+  readonly data: T | undefined;
+
+  /** Load this asset if not already loaded. Returns the loaded data. */
+  load(): Promise<T>;
+
+  /** Unload this asset, freeing memory. */
+  unload(): void;
+}
+```
+
+Entity fields that reference assets hold the `id` string; the asset subsystem resolves it to an `AssetHandle` on demand:
+
+```typescript
+// Previously (pre-SaaS): portrait: "assets/portraits/hermit.png"
+// Now: portrait is an asset ID resolved via ctx.assets.
+const character = await db.get('old-hermit');
+const portrait = await ctx.assets.resolve<THREE.Texture>(character.data.portrait);
+```
+
+### AssetSource
+
+Transport is abstracted behind an `AssetSource`. Clients pick the variant that matches their environment.
+
+```typescript
+export interface AssetSource {
+  /** Fetch metadata + a cached-or-fresh URL / ArrayBuffer for this asset ID. */
+  resolve(id: string): Promise<ResolvedAsset>;
+}
+
+export type ResolvedAsset =
+  | { kind: 'url'; url: string; expiresAt: number; sha256: string; contentType: string; byteLength: number }
+  | { kind: 'bytes'; bytes: ArrayBuffer; sha256: string; contentType: string };
+```
+
+- **Browser source** — calls `GET /api/projects/:pid/assets/:id`, receives `{ url, expiresAt, sha256, contentType, byteLength }`, returns `{ kind: 'url', url, ... }`. Refreshes the URL on expiry.
+- **Engine-plugin source** — checks local content-addressed disk cache by `sha256`; on miss, calls `GET /api/projects/:pid/assets/:id/raw` and streams bytes into the cache, returns `{ kind: 'bytes', bytes, ... }`.
+- **Phase 1 shim source** — reads from the in-memory/IndexedDB shim populated during template seeding.
+- **On-prem source** — identical to the browser source; signed URLs are issued by the on-prem backend against its MinIO bucket.
+
+Loaders consume either form transparently.
+
+## Asset Bundles
+
+Bundles group related assets for batch loading. When a scene starts, its bundle is loaded, pulling in all textures, models, audio, and data for that scene:
+
+```typescript
+await assetManager.loadBundle('Level.Forest');
+assetManager.unloadBundle('Level.Forest');
+```
+
+Bundle tags use the hierarchical tag system. Loading `Level` loads `Level.Forest`, `Level.Dungeon`, etc. Loading `Level.Forest` loads only forest assets.
+
+Bundle membership is a property of the asset entity (`data.bundle`) — set at upload time, editable through the asset browser. Server returns a bundle's asset list via `GET /api/projects/:pid/assets?bundle=Level.Forest`.
+
+## Asset Loaders
+
+Each asset kind has a registered loader:
+
+```typescript
+export interface AssetLoader<T> {
+  readonly kind: AssetHandle['kind'];
+  /** Parse ArrayBuffer (engine plugin path, pre-fetched bytes). */
+  loadFromBytes(bytes: ArrayBuffer, ctx: AssetLoadContext): Promise<T>;
+  /** Fetch + parse via URL (browser path). */
+  loadFromUrl(url: string, ctx: AssetLoadContext): Promise<T>;
+  unload?(data: T): void;
+}
+
+export interface AssetLoadContext {
+  onProgress?(progress: number): void;
+  signal?: AbortSignal;
+  /** Shared AudioContext for audio loaders — owned by @alumic/audio. */
+  getAudioContext?(): AudioContext;
+}
+```
+
+### Built-In Loaders
+
+```typescript
+// Texture
+const textureLoader: AssetLoader<THREE.Texture> = {
+  kind: 'texture',
+  async loadFromUrl(url) { return new THREE.TextureLoader().loadAsync(url); },
+  async loadFromBytes(bytes) {
+    const blob = new Blob([bytes]);
+    const url = URL.createObjectURL(blob);
+    try { return await new THREE.TextureLoader().loadAsync(url); }
+    finally { URL.revokeObjectURL(url); }
+  },
+  unload(tex) { tex.dispose(); },
+};
+
+// GLTF model
+const modelLoader: AssetLoader<THREE.Group> = {
+  kind: 'model',
+  async loadFromUrl(url) {
+    const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+    return (await new GLTFLoader().loadAsync(url)).scene;
+  },
+  async loadFromBytes(bytes) {
+    const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+    return new Promise((resolve, reject) => {
+      new GLTFLoader().parse(bytes, '', g => resolve(g.scene), reject);
+    });
+  },
+  unload(group) {
+    group.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.geometry.dispose();
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        mats.forEach(m => m.dispose());
+      }
+    });
+  },
+};
+
+// Audio
+const audioLoader: AssetLoader<AudioBuffer> = {
+  kind: 'audio',
+  async loadFromUrl(url, ctx) {
+    const audioCtx = ctx.getAudioContext!();
+    const bytes = await (await fetch(url)).arrayBuffer();
+    return audioCtx.decodeAudioData(bytes);
+  },
+  async loadFromBytes(bytes, ctx) {
+    return ctx.getAudioContext!().decodeAudioData(bytes);
+  },
+};
+```
+
+### Custom Loaders
+
+Plugins register custom loaders via `ctx.assets.registerLoader(loader)`. Loaders are App-scope.
+
+## Asset Manager Subsystem
+
+```typescript
+export const AssetSubsystem = defineSubsystem<AssetManager>(
+  Scope.App,
+  (ctx) => ({
+    async init() {
+      const source = selectAssetSource(ctx);  // browser | plugin | shim | on-prem
+      const manager = new AssetManager(source);
+      manager.registerLoader(textureLoader);
+      manager.registerLoader(modelLoader);
+      manager.registerLoader(audioLoader);
+      return manager;
+    },
+    deinit(manager) { manager.unloadAll(); },
+  }),
+);
+
+export class AssetManager {
+  registerLoader<T>(loader: AssetLoader<T>): void;
+  resolve<T>(id: string): Promise<AssetHandle<T>>;
+  load<T>(id: string): Promise<T>;
+  loadBundle(bundleTag: string, onProgress?: (loaded: number, total: number) => void): Promise<void>;
+  unloadBundle(bundleTag: string): void;
+  unloadAll(): void;
+  isLoaded(id: string): boolean;
+}
+```
+
+## Upload Flow
+
+Uploads are two-step ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)):
+
+```typescript
+// 1. Request an upload URL (server computes storage key, validates plan/quota).
+const { assetId, uploadUrl, expiresAt } = await api.requestAssetUpload({
+  kind: 'texture',
+  contentType: 'image/png',
+  byteLength: file.size,
+  sha256: await sha256Of(file),
+});
+
+// 2. PUT bytes directly to object storage.
+await fetch(uploadUrl, { method: 'PUT', body: file });
+
+// 3. Commit (server verifies hash + byte length, creates asset entity).
+await api.commitAsset(assetId);
+```
+
+On commit, the server emits `asset.committed` over the sync channel ([Entity API](/reference/entity-api)) so other clients see the new asset without polling.
+
+## Loading Lifecycle
+
+### Scene-Based Loading
+
+```typescript
+SceneEntered.on(async (e) => {
+  const assets = ctx.get(AssetSubsystem);
+  LoadingStarted.emit({ sceneId: e.sceneId });
+  await assets.loadBundle(`Level.${e.sceneId}`, (loaded, total) => {
+    LoadingProgress.emit({ sceneId: e.sceneId, loaded, total });
+  });
+  LoadingComplete.emit({ sceneId: e.sceneId });
+});
+
+SceneExited.on((e) => {
+  ctx.get(AssetSubsystem).unloadBundle(`Level.${e.sceneId}`);
+});
+```
+
+### Lazy Loading
+
+```typescript
+const handle = await assets.resolve<THREE.Texture>('018f-...');
+const texture = await handle.load();
+```
+
+## Event Channels
+
+```typescript
+export const AssetLoaded = defineChannel<{ id: string; kind: string; bundle?: string }>('Asset.Loaded');
+export const AssetError  = defineChannel<{ id: string; kind: string; error: Error }>('Asset.Error');
+export const BundleLoadStarted  = defineChannel<{ bundle: string; assetCount: number }>('Asset.Bundle.Started');
+export const BundleLoadProgress = defineChannel<{ bundle: string; loaded: number; total: number }>('Asset.Bundle.Progress');
+export const BundleLoadComplete = defineChannel<{ bundle: string }>('Asset.Bundle.Complete');
+```
+
+## Caching
+
+- **Browser** — HTTP cache keys on the signed URL, which encodes the content hash. Different content → different URL → no stale cache. Expiry triggers a transparent URL refresh.
+- **Engine plugin** — on-disk cache keyed by SHA-256 (`<cache-dir>/<first-2-hash>/<full-hash>`). `If-None-Match: <sha256>` on pull returns `304 Not Modified` when the client's cache is current.
+- **Template seed assets** — at template install, seed bytes are uploaded into the new project's asset table and get fresh IDs; templates never ship Vite-bundled raw bytes in the runtime bundle.
+
+## File Export
+
+`alumic export` ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)) writes:
+
+```
+data/
+├── assets/
+│   ├── manifest.json          # [{id, sha256, kind, contentType, bundle}, ...]
+│   └── blobs/
+│       └── <first-2-of-sha>/<full-sha>
+└── entities/...
+```
+
+Entity references to asset IDs are preserved; on import, the backend re-uploads blobs and either preserves IDs or re-mints them (configurable via import flag).
+
+## Future: Rust/WASM Asset Processing (Phase 5)
+
+For heavy-duty asset processing (texture compression, mesh optimization, heightmap generation), a Rust/WASM module runs either in the browser or the backend:
+
+```typescript
+const wasm = await import('@alumic/assets-wasm');
+assetManager.registerProcessor({
+  kind: 'texture',
+  async process(raw: ArrayBuffer) {
+    return wasm.compressTexture(raw, { format: 'bc7' });
+  },
+});
+```
+
+This is a Phase 5 concern.

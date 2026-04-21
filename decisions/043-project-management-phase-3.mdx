@@ -1,0 +1,76 @@
+---
+title: "ADR-043: Project-management entity types land Phase 3; automation Phase 4"
+description: "**Phase 3** ships the minimum-complete project-management layer."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The audit-resolution corpus (through [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag)) has no primitives for team coordination — no kanban, no sprint, no issue, no comment thread. Phase 3 already commits to "team features" ([ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), spec/21): invitations, per-project roles. Project management is the natural next rung: it unlocks actual team workflow, ties authored content to work tracking, and — paired with [ADR-037 Plugin-defined schemas, extractors, and migrations ship as publish artifacts](/decisions/037-plugin-schema-registration) and [ADR-038 Multiplayer auth uses short-lived room tickets, not PATs](/decisions/038-multiplayer-room-tickets) — makes agentic workflows governable.
+
+The design tension is scope. A full Linear/Jira is years of work. The goal is a thin, correct primitive that rides on the entity graph and the approval pipeline already being built.
+
+## Decision
+
+**Phase 3** ships the minimum-complete project-management layer. **Phase 4** layers on automation and advanced UX.
+
+### Phase 3 deliverables (spec/27, spec/28)
+
+Built-in entity types, all registered via existing `ctx.entities.registerType()` ([ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api)):
+
+- `Issue` — flat work item with a workspace-configurable `kind` field (Linear-style, per planning decision). Fields: `title, body, kind, status, priority, assignee? (Actor), reporter (Actor), sprintId?, milestoneId?, boardId?, column?, labels, entityRefs`.
+- `Board` — kanban: `{ displayName, columns, lanes?, filter? }`. Editor surface `board` (new).
+- `Sprint` — time-bounded iteration: `{ displayName, startsAt, endsAt, boardId?, goal?, capacity? }`. Editor surface `sprint-backlog` (new).
+- `Milestone` — date-bounded target: `{ displayName, dueDate, description, state }`. Editor surface `milestone-timeline` (new).
+- `Comment` — thread attached to any entity. Not Issue-specific.
+- `Agent` — the actor registration ([ADR-037 Plugin-defined schemas, extractors, and migrations ship as publish artifacts](/decisions/037-plugin-schema-registration)). Editor `spec-sheet`.
+- `AgentRun` — an invocation record. Editor `spec-sheet` (read-only, with "Revert run" action).
+- `ReviewRequest` — a thin wrapper around an `entity_proposals` row ([ADR-038 Multiplayer auth uses short-lived room tickets, not PATs](/decisions/038-multiplayer-room-tickets)) so proposals appear in the entity browser and can be linked from Issues.
+
+Editor surfaces (via `ctx.editors.register()`, [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api)):
+- `board` — kanban with drag-between-columns, WIP limits, swimlanes.
+- `sprint-backlog` — ordered list of issues with sprint ceremonies.
+- `milestone-timeline` — read-only Gantt-ish timeline.
+
+Event channels (spec/06 convention): `PM.Issue.Created | Updated | StatusChanged | Assigned | Commented`, `PM.Board.Updated`, `PM.Sprint.Started | Ended`, `PM.Milestone.Achieved`, plus the proposal channels from [ADR-038 Multiplayer auth uses short-lived room tickets, not PATs](/decisions/038-multiplayer-room-tickets).
+
+Role matrix additions (spec/26):
+- Any workspace member can read PM entities.
+- `editor` creates / updates Issues, Boards, Sprints, Milestones.
+- `owner` configures approval policies and creates/revokes Agents.
+- Comments are open to any member.
+
+### Phase 4 deliverables (spec/27, spec/28)
+
+- `AutomationRule` entity type with trigger/condition/action shape. Automation runs as a system `Agent`, so every automation write is auditable and revertible via [ADR-037 Plugin-defined schemas, extractors, and migrations ship as publish artifacts](/decisions/037-plugin-schema-registration)/[ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log).
+- Policy editor UI ([ADR-038 Multiplayer auth uses short-lived room tickets, not PATs](/decisions/038-multiplayer-room-tickets) Phase 4).
+- Bulk-approve flow.
+- Velocity metrics, burndown, agent-run dashboards.
+- Cross-entity approval routing ("when an agent proposes a write touching a critical-tagged entity, require owner approval").
+
+### Phase 5+ (deferred)
+
+- Cross-project dependencies.
+- SLA tracking.
+- Multi-workspace rollups.
+
+### Not in scope
+
+- A separate "project-management mode" top-level tab. PM entities open in their registered editor surfaces through the normal spec/24 navigation. Entity-centric navigation handles the multi-tool problem.
+- Time tracking, billable hours — product decision to stay out.
+- Chat-style realtime conversation — Comments are message threads, not a chat product.
+
+## Consequences
+
+**Enables:** Real team coordination within Alumic, co-located with authored content. `Issue.entityRefs` makes "the canonical Linear ticket references the entity in question" a native primitive. Agents participate as first-class authors on day one of Phase 3. Approvals are the default path for agent edits, not a bolt-on.
+
+**Obligates:** Phase 3 ships more than [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing) originally committed to — actor model, proposal pipeline, and PM types all land together. The `ctx.entities.registerType()` interface must be stable enough to accept nine more types without churn. The sync stream picks up `PM.*` and `proposal.*` event families.
+
+**Forecloses:** A separate third-party PM tool integration as the primary path. An external-linker plugin (GitHub issues, Linear issues) can still ship, but it adapts *into* the native PM graph rather than replacing it.
+
+## Related
+
+- Specs: [Roadmap](/concepts/roadmap), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [Navigation and Shell](/reference/navigation-shell), [Undo and History](/reference/undo-history), [Permissions](/reference/permissions), [Project Management](/reference/project-management), [Actors and Agents](/reference/actors-and-agents)
+- Depends on: [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), [ADR-023 Phases 4 and 5 are conditional on adoption](/decisions/023-phase-4-5-conditional), [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals).

@@ -1,0 +1,54 @@
+---
+title: "ADR-033: Engine-portable transpile runs server-side on publish"
+description: "The transpile pipeline runs **server-side on publish**."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed) exposes the `FieldType` schema for engine-portable components. [overview](/) promises Unity/Unreal/Godot deployment. No ADR described *where* the TS → C#/Rust/C++ transpile runs. Three candidates: browser (bundled compiler — heavy), engine plugin (compiler in Unity — unreasonable), or backend.
+
+The engine plugin should pull ready-to-use artifacts, not source.
+
+## Decision
+
+The transpile pipeline runs **server-side on publish**. When a plugin or template is published to the marketplace ([ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4)), the publish pipeline produces target artifacts:
+
+```
+plugin@version/
+├── meta.json                    # extracted from definePlugin().meta
+├── bundle.js                    # browser runtime
+├── schema.json                  # entity-type descriptors ([ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation))
+├── artifacts/
+│   ├── unity-csharp/            # C# source, .asmdef, sample prefabs
+│   ├── unreal-cpp/              # C++ source, .Build.cs
+│   └── godot-gdextension/       # C++ source, .gdextension
+```
+
+Artifacts are content-addressed and cached. The engine plugin fetches:
+
+```
+GET /api/artifacts/:pluginId/:version/:target
+```
+
+A workspace-scoped on-demand transpile is available for unpublished in-development plugins: `POST /api/transpile` with `{ pluginId, target }` returns an artifact URL. Rate-limited, cached, billed against the workspace ([ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag)).
+
+Per-target packages in the monorepo: `@alumic/transpile-csharp`, `@alumic/transpile-cpp`, `@alumic/transpile-gdextension`. Each reads a TS AST (via `typescript` compiler API) + entity schemas ([ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed)), emits native sources.
+
+Roadmap phasing: the transpile pipeline is a **Phase 4** deliverable alongside the marketplace ([ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4)) and the engine plugin (spec 25). Phase 1-3 do not ship engine artifacts; the engine-portability claim becomes actionable in Phase 4.
+
+## Consequences
+
+**Enables:** One canonical transpile per plugin+version+target; the engine plugin never runs a compiler. On-prem gets the same pipeline in the Docker image. Marketplace artifacts are reproducible and signed ([ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing)).
+
+**Obligates:** Transpilers are part of Alumic's core codebase, not optional. Any TS-language feature outside the transpilable subset (runtime reflection, untyped `any`, dynamic imports) is a publish-time error on components that claim portability. The "portable subset" must be documented alongside `FieldType`.
+
+**Forecloses:** Client-side transpile. Template authors cannot "just press a button" to export a Unity build locally without going through the publish pipeline (or the `/api/transpile` endpoint).
+
+## Related
+
+- Specs: [Alumic](/), [Design Principles](/concepts/principles), [Glossary](/concepts/glossary), [Three-Layer Data Model](/concepts/three-layer-model), [What Alumic Is Not](/concepts/what-alumic-is-not), [Roadmap](/concepts/roadmap), [Engine Plugin](/platform/engine-plugin)
+- Depends on: [ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4).
+- Informs: [ADR-023 Phases 4 and 5 are conditional on adoption](/decisions/023-phase-4-5-conditional) (Phase 4 deliverable list), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol) (plugin artifact pull).

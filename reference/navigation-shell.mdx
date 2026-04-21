@@ -1,0 +1,445 @@
+---
+title: "Navigation and Shell"
+description: "Three-column layout, entity browser, viewport, inspector, tabs, splits."
+icon: "window-restore"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)
+</Info>
+
+## Overview
+
+Alumic's application shell is built around **entity-centric navigation**. The entity is the unit of navigation — not a "mode" or a "tool." When you open a Character entity, you see a spec sheet. When you open a Dialogue entity, you see a graph editor. When you open a Scene entity, you see a 3D viewport. The tool surface changes because the entity type changes, not because you switched modes.
+
+This eliminates the "mode switching" problem that plagues multi-tool applications. You don't think "I need to switch to graph editor mode." You think "I need to open the hermit's dialogue." The right tool appears automatically.
+
+
+## Application Layout
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  ◂ ▸  Project › Forest Zone › Old Hermit › intro.graph      [⌘K]      │
+├──────────┬──────────────────────────────────────────┬───────────────────┤
+│          │ ◆ intro.graph  ◆ Old Hermit  ◆ Forest   │                   │
+│  Entity  ├──────────────────────────────────────────┤    Inspector      │
+│  Browser │                                          │                   │
+│          │                                          │  ┌─────────────┐ │
+│ 🔍 Search│         Main Viewport                    │  │ Properties  │ │
+│          │                                          │  │             │ │
+│ ▾ Chars  │   (editor surface determined by          │  │ name: ...   │ │
+│   Hermit │    focused entity type)                  │  │ role: npc   │ │
+│   Knight │                                          │  │ bio: ...    │ │
+│ ▾ Locs   │                                          │  │             │ │
+│   Forest │                                          │  ├─────────────┤ │
+│   Ruins  │                                          │  │ References  │ │
+│ ▾ Dlgs   │                                          │  │             │ │
+│   intro  │                                          │  │ → intro.dlg │ │
+│ ▾ Quests │                                          │  │ → hermit-q  │ │
+│ ▾ Lore   │                                          │  │             │ │
+│ ▾ Scenes │                                          │  ├─────────────┤ │
+│ ▾ Items  │                                          │  │ Used By     │ │
+│ ▾ UI     │                                          │  │             │ │
+│ ▾ Icons  │                                          │  │ ← quest-01  │ │
+│ ▾ Canvas │                                          │  │ ← forest-bd │ │
+│          │                                          │  │             │ │
+├──────────┴──────────────────────────────────────────┴───────────────────┤
+│  [Author]  [Test]  [Cross-Ref]  [Design]              FPS: 60  ▪ 16ms  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Three Columns
+
+| Column | Width | Purpose |
+|--------|-------|---------|
+| **Entity Browser** (left) | ~220px, resizable | Type-grouped entity tree with search |
+| **Main Viewport** (center) | Fills remaining space | Editor surface for the focused entity |
+| **Inspector** (right) | ~300px, resizable, collapsible | Properties + References + Used By |
+
+All three columns are always visible (the inspector can be collapsed). This is not a docking system — the layout is structural and opinionated.
+
+
+## Entity Browser (Left Column)
+
+The browser is a **paged, lazy** view over the entity database — never a full dump. Opening a type group triggers `GET /api/projects/:pid/entities?type=X&limit=100` against the Entity API ([Entity API](/reference/entity-api)); scrolling pages via cursor. Search uses the server's fuzzy-search endpoint, not a client-side scan. Projects with tens of thousands of entities stay usable because no client ever holds them all in memory.
+
+### Structure
+
+```
+🔍 Search entities...                    [+ New ▾]
+
+▾ Characters (3)
+    Old Hermit
+    Knight Captain
+    Forest Spirit
+
+▸ Locations (4)
+
+▾ Dialogues (2)
+    intro-dialogue
+    shopkeeper-greeting
+
+▸ Quests (1)
+▸ Lore (3)
+▸ Scenes (2)
+▸ Items (8)
+▸ Abilities (5)
+▸ UI Layouts (2)
+▸ Icon Sets (1)
+▸ Canvas Boards (1)
+
+──────────────────────
+Recent
+    intro-dialogue      3m ago
+    Old Hermit          12m ago
+    Forest Zone         1h ago
+```
+
+### Behaviors
+
+- **Type groups** are collapsible. Count shown in parentheses.
+- **Search** (top) filters across all types. Results are grouped by type. Fuzzy matching on entity name. Optionally filter by type or tag.
+- **Click** an entity to open it in the main viewport (becomes the focused entity).
+- **Right-click** for context menu: Rename, Duplicate, Delete, Copy ID, Show in Canvas.
+- **Drag** an entity onto the main viewport (e.g., drag a Character onto a canvas board to create a node for it).
+- **[+ New]** dropdown creates a new entity of any type. Opens a "New Entity" dialog with type selection and name field.
+- **Recent** section at the bottom shows the last ~5 entities you interacted with (regardless of type).
+
+### Search Ergonomics
+
+Search is the primary navigation mechanism for large projects. It must be fast and forgiving:
+
+```
+🔍 "herm"
+  Characters
+    Old Hermit                          [Enter to open]
+
+🔍 "fire"
+  Abilities
+    Fireball
+    Fire Shield
+  Lore
+    History of Fire Magic
+  Tags
+    Ability.Fire (3 entities)           [Enter to filter by tag]
+```
+
+Search indexes: entity names, entity IDs, tags, and a configurable set of data fields (e.g., character bios, lore body text).
+
+**Keyboard:** `Cmd+K` (or `Ctrl+K`) opens a command palette that combines entity search with action search:
+
+```
+> Open Entity: herm
+  Old Hermit (Character)                    ↵
+  Hermit's Quest (Quest)                    ↵
+
+> Run: validate
+  Validate All Data Files                   ↵
+  Validate Current Entity                   ↵
+```
+
+
+## Main Viewport (Center Column)
+
+The main viewport shows the editor surface appropriate for the focused entity's type:
+
+| Entity Type | Editor Surface | Description |
+|-------------|---------------|-------------|
+| Scene | **3D Viewport** | Three.js rendered scene with transform gizmos |
+| Dialogue | **Graph Editor** | Node-and-edge visual graph |
+| Quest | **Graph Editor** | Quest flow graph |
+| Character | **Spec Sheet** | Form-based property editor with portrait, bio, attributes |
+| Location | **Spec Sheet** | Form with description, coordinates, scene link |
+| Lore | **Document Editor** | Markdown editor with entity link support |
+| Item | **Spec Sheet** | Form with stats, icon, effects |
+| Ability | **Spec Sheet** | Form with cooldown, cost, effects, tags |
+| UILayout | **UI Designer** | WYSIWYG Yoga layout designer |
+| IconSet | **Vector Editor** | SVG icon drawing tools |
+| CanvasBoard | **Infinite Canvas** | Pan/zoom workspace with entity nodes |
+| Board (PM) | **Kanban** ([Project Management](/reference/project-management)) | Column view with drag-between-columns, WIP limits, swimlanes |
+| Sprint (PM) | **Sprint Backlog** ([Project Management](/reference/project-management)) | Ordered issue list with sprint ceremonies (start/complete) |
+| Milestone (PM) | **Milestone Timeline** ([Project Management](/reference/project-management)) | Read-only Gantt timeline |
+| Issue, Comment, Agent, AgentRun, ReviewRequest, AutomationRule | **Spec Sheet** | Form editor; Issue opens with Comments drawer + Linked ReviewRequest badge; AgentRun opens read-only with a "Revert run" action ([Project Management](/reference/project-management), [Actors and Agents](/reference/actors-and-agents)) |
+
+### Editor Surface Mounting
+
+Each editor surface is a SolidJS component that receives the entity data and renders the appropriate tool:
+
+```typescript
+export interface EditorSurface {
+  /** Entity type(s) this editor handles. */
+  readonly types: string[];
+
+  /** SolidJS component to render. */
+  readonly component: Component<{ entity: Entity; ctx: AppContext }>;
+
+  /** Optional toolbar items for this editor. */
+  readonly toolbar?: Component<{ entity: Entity }>;
+}
+```
+
+Editor surfaces are registered by plugins via `ctx.editors.register()` (see [App Lifecycle](/reference/app-lifecycle) and [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api)), so custom entity types automatically get editors:
+
+```typescript
+// In a plugin's build():
+ctx.editors.register({
+  types: ['CraftingRecipe'],
+  component: CraftingRecipeEditor,
+  toolbar: CraftingRecipeToolbar,
+});
+```
+
+Collision policy: registering two surfaces that claim the same entity type throws at boot.
+
+
+## Inspector (Right Column)
+
+The inspector is the linchpin of entity-centric navigation. It always shows three sections for the currently **selected** element (which may differ from the focused entity — e.g., you're focused on a dialogue graph, but you've selected a specific node within it).
+
+### Properties Section
+
+Shows editable properties of the selected element. The fields rendered depend on the entity type and the selection context:
+
+- **Entity selected in browser** → shows the entity's top-level data fields
+- **Node selected in graph** → shows the node's data fields (speaker, text, conditions)
+- **Object selected in 3D viewport** → shows transform, material, components
+- **Element selected in UI designer** → shows Yoga style properties
+
+### References Section (Outbound)
+
+Shows all entities that the current entity references:
+
+```
+References
+─────────────────────
+speaker → Old Hermit (Character)        [click to open]
+speaker → Knight Captain (Character)    [click to open]
+location → Forest Clearing (Location)   [click to open]
+mentions → Founding Lore (Lore)         [click to open]
+```
+
+Each reference is clickable — it navigates to the referenced entity. The reference role is shown as a label.
+
+### Used By Section (Backlinks)
+
+Shows all entities that reference the current entity:
+
+```
+Used By
+─────────────────────
+intro-dialogue (Dialogue) as speaker     [click to open]
+hermit-quest (Quest) as questGiver       [click to open]
+forest-board (CanvasBoard) as node       [click to open]
+forest-lore (Lore) as relatedCharacters  [click to open]
+```
+
+Each backlink is clickable — it navigates to the source entity. This is how you discover the web of relationships without the canvas. "Who references this character?" is one glance.
+
+### Comments Drawer ([Project Management](/reference/project-management))
+
+Every entity — not just Issues — surfaces a Comments drawer below the Used By section. Threaded markdown comments target the current entity via `Comment.targetEntityId`. `@-mention` autocomplete suggests actors (both Users and Agents) and entities; mentions emit refs via the Comment extractor so a user's "Used By" shows where they were mentioned.
+
+### Linked ReviewRequest Badge (Issue only, [Project Management](/reference/project-management), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals))
+
+When an Issue carries a `reviewRequestId`, the Inspector shows a badge with the pending proposal's diff and inline Approve / Request Changes / Reject buttons if the viewer is a designated reviewer. Approvals update the proposal state via `POST /api/projects/:pid/proposals/:id/review`.
+
+### Preview Section (Contextual)
+
+For some entity types, a small preview at the bottom of the inspector:
+
+- **Character** → portrait thumbnail
+- **Scene** → 3D scene thumbnail
+- **UILayout** → rendered layout preview
+- **IconSet** → icon grid preview
+
+
+## Focus Stack and Breadcrumbs
+
+The breadcrumb trail shows the navigation path:
+
+```
+◂ ▸  Project  ›  Forest Zone  ›  Old Hermit  ›  intro.graph
+```
+
+Each segment is clickable — click "Forest Zone" to go back to the canvas board. Click "Old Hermit" to go back to the character spec sheet.
+
+The focus stack is a linear history (like a browser). `◂` goes back, `▸` goes forward. Keyboard: `Alt+Left` / `Alt+Right`.
+
+### Navigation Triggers
+
+| Action | Result |
+|--------|--------|
+| Click entity in browser | Focus that entity. Push onto focus stack. |
+| Click reference in inspector | Focus the referenced entity. Push onto stack. |
+| Click backlink in inspector | Focus the source entity. Push onto stack. |
+| Double-click canvas node | Focus the node's entity. Push onto stack. |
+| Click dialogue node's speaker | Focus the character entity. Push onto stack. |
+| Click breadcrumb segment | Pop stack back to that point. |
+| `Alt+Left` | Go back one step. |
+| `Alt+Right` | Go forward one step. |
+| `Cmd+K` then select entity | Focus that entity. Push onto stack. |
+
+
+## Tab Bar
+
+The tab bar sits above the main viewport. It shows persistent entity tabs and supports peek-and-return.
+
+### Tab Behavior
+
+- **Opening an entity** creates a tab. If you navigate away within a few seconds (peek), the tab is replaced by the next entity. If you stay, the tab becomes persistent.
+- **Persistent tabs** remain until explicitly closed (click X or `Cmd+W`).
+- **Clicking a tab** focuses that entity (without adding to the focus stack — tabs are direct jumps).
+- **Tab limit:** After ~8 tabs, the oldest non-pinned tab is auto-closed. Users can pin tabs to prevent this.
+- **Tab tooltip:** Shows entity type and full path.
+
+```
+◆ intro.graph  ◆ Old Hermit  ◆ Forest Zone  ✕  ◆ hermit-quest  ✕
+                                              ↑ pinned (no X)
+```
+
+### Peek vs. Persist
+
+The "peek" pattern prevents tab explosion. When you click a reference in the inspector to check something, the new entity opens in a "preview" state. If you click another reference or press back within ~3 seconds, the tab is replaced. If you edit the entity or stay on it, the tab persists.
+
+This is inspired by VS Code's "preview mode" (italic tab title) — quick looks don't pollute your tab bar.
+
+
+## Split Views
+
+The main viewport supports a **2-panel split**: left and right. Each panel shows an entity editor independently.
+
+```
+┌─────────────────────────┬─────────────────────────┐
+│                         │                         │
+│    Panel A              │    Panel B              │
+│    (Graph Editor)       │    (3D Viewport)        │
+│                         │                         │
+│    intro.graph          │    Forest Zone           │
+│                         │                         │
+└─────────────────────────┴─────────────────────────┘
+```
+
+### Split Activation
+
+- **Drag a tab to the right edge** of the viewport to create a split.
+- **Right-click a tab** → "Open in Split."
+- **Keyboard:** `Cmd+\` to toggle split.
+- **Closing all tabs** in one panel collapses the split.
+
+### Split Constraints
+
+- **Only one split** — left/right, never top/bottom, never 3+ panels.
+- **Each panel has its own tab bar.** Tabs can be dragged between panels.
+- **The inspector shows properties for the active panel's selection.** Click inside a panel to make it active (indicated by a subtle border highlight).
+- **Both panels share the same focus stack and breadcrumbs.** Navigation in either panel pushes to the stack.
+
+### Why Left/Right Only
+
+Top/bottom splits create awkward layouts when the left column (entity browser) and right column (inspector) are already consuming horizontal space. A left/right split between two editors, flanked by the browser and inspector, produces a natural 4-column layout:
+
+```
+Browser | Editor A | Editor B | Inspector
+```
+
+This is enough for the common workflows (graph + preview, two documents, code + output) without becoming a window manager.
+
+
+## Layout Presets
+
+Presets are one-click workspace configurations. They adjust the split state and which editors are visible:
+
+| Preset | Left Panel | Right Panel | Use Case |
+|--------|-----------|-------------|----------|
+| **Author** | Graph/Document editor | (no split) | Writing dialogue, editing lore |
+| **Test** | 3D Viewport | (no split) | Playtesting a scene |
+| **Cross-Ref** | Graph Editor | 3D Viewport | Authoring dialogue while seeing the scene |
+| **Design** | UI Designer | Game preview (live) | Designing HUD with live feedback |
+
+Presets are selected from the bottom toolbar. They don't change which entities are open — they change the viewport arrangement.
+
+Users can save custom presets.
+
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Cmd+K` | Command palette (search entities + actions) |
+| `Cmd+P` | Quick open entity (search by name) |
+| `Alt+Left` | Navigate back |
+| `Alt+Right` | Navigate forward |
+| `Cmd+W` | Close current tab |
+| `Cmd+Shift+T` | Reopen last closed tab |
+| `Cmd+Tab` | Switch to next tab |
+| `Cmd+Shift+Tab` | Switch to previous tab |
+| `Cmd+1` through `Cmd+9` | Switch to tab by index |
+| `Cmd+\` | Toggle split view |
+| `Cmd+B` | Toggle entity browser |
+| `Cmd+I` | Toggle inspector |
+| `Cmd+Shift+E` | Focus entity browser |
+| `Cmd+N` | New entity |
+| `Cmd+S` | Save current entity |
+| `Cmd+Z` / `Cmd+Shift+Z` | Undo / Redo (client-local command stack over the server-side version log; authoritative revert via `POST /entities/:id/revert` — [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)) |
+
+
+## SolidJS Component Architecture
+
+```typescript
+// Root application shell
+export function AlumicShell(props: { project: ProjectHandle }) {
+  return (
+    <NavigationProvider>
+      <EntityDatabaseProvider project={props.project}>
+        <div class="alumic-shell">
+          <Breadcrumbs />
+          <div class="alumic-body">
+            <EntityBrowser />
+            <MainViewport />
+            <Inspector />
+          </div>
+          <StatusBar />
+        </div>
+      </EntityDatabaseProvider>
+    </NavigationProvider>
+  );
+}
+
+// Navigation context (focus stack, tabs, splits)
+export function NavigationProvider(props: { children: JSX.Element }) {
+  // Provides: focusStack, tabs, activeTab, split state
+  // via SolidJS context
+}
+
+// Main viewport handles tab bar + editor surface mounting
+export function MainViewport() {
+  const { activeTab, tabs, splitState } = useNavigation();
+
+  return (
+    <div class="viewport">
+      <TabBar tabs={tabs()} active={activeTab()} />
+      <Show when={splitState().split} fallback={
+        <EditorMount entity={activeTab()?.entity} />
+      }>
+        <SplitView>
+          <EditorMount entity={splitState().left?.entity} />
+          <EditorMount entity={splitState().right?.entity} />
+        </SplitView>
+      </Show>
+    </div>
+  );
+}
+
+// EditorMount selects the right editor component based on entity type
+export function EditorMount(props: { entity: Entity | undefined }) {
+  const registry = useEditorRegistry();
+
+  return (
+    <Show when={props.entity}>
+      {(entity) => {
+        const surface = registry.getEditor(entity().type);
+        return <surface.component entity={entity()} />;
+      }}
+    </Show>
+  );
+}
+```

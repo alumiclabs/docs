@@ -1,0 +1,21 @@
+---
+title: "Middleware and Write Path"
+description: "Auth → workspace scope → rate limit → quota → meter → permission → handler."
+icon: "shield"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag)
+</Info>
+
+## Middleware Stack
+
+Every request passes through, in order:
+
+1. **Auth** — resolves `Authorization` header to `{ userId, workspaceId, clientKind, scopes }`. Missing/invalid → 401.
+2. **Workspace scope** — attaches `workspaceId` to `req.ctx` for metering and quotas ([ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag)).
+3. **Rate limit** — per-workspace + per-PAT token buckets on write routes.
+4. **Quota** — per-plan caps on entities/project, storage bytes, asset egress ([ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag) Phase 3+).
+5. **Meter** — records `usage_events` row post-response.
+6. **Permission** — role check for the operation (see [Permissions](/reference/permissions)).
+7. **Handler** — business logic.

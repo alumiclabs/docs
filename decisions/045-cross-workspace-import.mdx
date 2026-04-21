@@ -1,0 +1,48 @@
+---
+title: "ADR-045: Cross-workspace import requires target-side plugin presence"
+description: "`alumic import` performs a **schema-presence pre-flight**:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation) scopes `/api/schema` to the caller's workspace — different workspaces can have different installed plugins, and therefore different registered entity types. `alumic export` and `alumic import` ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)) let a project round-trip across workspaces via a file-shaped archive. What happens when the target workspace is missing an entity type the export depends on (e.g., `CraftingRecipe` from a survival bundle) was not specified.
+
+## Decision
+
+`alumic import` performs a **schema-presence pre-flight**:
+
+1. The archive's `project.json` carries a `requiredPlugins: [{ id, version }]` list (extracted at export time from the source workspace's `/api/schema`).
+2. On import, the CLI queries the target workspace's `/api/schema`. Any required plugin that is missing or older than the archive's minimum supported version surfaces as a typed error:
+
+```json
+{
+  "error": "missing-plugins",
+  "message": "The target workspace is missing plugins required by this archive.",
+  "details": {
+    "missing": [
+      { "pluginId": "survival-bundle", "minVersion": "0.3.0", "installUrl": "https://alumic.app/marketplace/survival-bundle" }
+    ]
+  }
+}
+```
+
+3. The user runs `alumic marketplace install survival-bundle` (or the equivalent web action) against the target workspace, then re-runs `alumic import`.
+4. Import only proceeds when `requiredPlugins` is satisfied; no partial imports, no silent dropping of entities of unknown types.
+
+`--force` on `alumic import` lets the user accept a partial import: entities of unknown types are skipped and reported; entities with refs into the skipped set have those refs nulled per [ADR-053 Delete-with-backlinks nulls inbound refs and writes new source versions](/decisions/053-delete-with-backlinks-fanout). This is a power-user escape hatch, not the default.
+
+## Consequences
+
+**Enables:** Cross-workspace moves work without silent data loss. Teams moving projects between studios get a clear "install these plugins first" signal.
+
+**Obligates:** The export pipeline ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware) `alumic export`) records the workspace's installed plugin list into `project.json`. The marketplace install API must be idempotent — re-running import after an install of one missing plugin is cheap.
+
+**Forecloses:** Lossy cross-workspace imports by default. `--force` is explicit and reported.
+
+## Related
+
+- Specs: [CLI](/guides/cli), [Validation](/guides/validation), [Testing](/guides/testing), [Debugging](/guides/debugging), [Permissions](/reference/permissions)
+- Depends on: [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware), [ADR-048 Template install seeds entities and rewrites refs server-side](/decisions/048-template-install-seed), [ADR-053 Delete-with-backlinks nulls inbound refs and writes new source versions](/decisions/053-delete-with-backlinks-fanout).

@@ -1,0 +1,49 @@
+---
+title: "ADR-019: ECS FieldType enum is exposed for engine-portable transpilation"
+description: "`@alumic/ecs` exposes a `FieldType` enum as a public API:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The spec's `00-overview.md:49-57` claims Alumic systems are "engine-portable" — designed to transpile to C#, Rust, or C++ for Unity/Unreal/Godot/custom engines. The claim names "plain-data component schemas with `FieldType` mappings to native types" as the mechanism.
+
+But no `FieldType` surface was defined anywhere in the spec. `@alumic/ecs` was described as "optional plumbing" without committing to whether its schemas are portable or opaque. The portability claim had no implementation path.
+
+Two positions from the research: (a) expose `FieldType` to enable portable-by-construction components (research brief), (b) hide implementation details for DX (executive summary + game-engine research PDF).
+
+## Decision
+
+`@alumic/ecs` exposes a `FieldType` enum as a public API:
+
+```ts
+export type FieldType =
+  | 'f32' | 'f64' | 'i32' | 'u32' | 'bool' | 'str'
+  | { array: FieldType; length: number }
+  | { ref: 'entity' };
+
+export interface ComponentSchema {
+  readonly name: string;
+  readonly fields: Record<string, FieldType>;
+}
+```
+
+Component definitions use this schema shape. Transpilers map `FieldType` to native types: `f32` → C# `float` / Rust `f32` / C++ `float`; `{array: 'f32', length: 3}` → C# `Vector3` / Rust `[f32; 3]`; `{ref: 'entity'}` → engine-specific entity handle.
+
+The schema is **required for components**, not merely advisory. Components authored without `FieldType`-shaped fields cannot be transpiled; the portability claim covers components that follow the schema.
+
+## Consequences
+
+**Enables:** The engine-portability claim in [Alumic](/) is actionable. Tools can walk a component schema and emit native struct definitions. Plugin authors who want their systems portable write schemas; those who don't care use plain TS objects outside `@alumic/ecs`.
+
+**Obligates:** `@alumic/ecs-koota` and any future backend map `FieldType` schemas to their native storage (`TypedArray`-backed in koota, SoA in bitECS). `@alumic/ecs` ships with an in-memory reference backend in Phase 2 ([ADR-022 koota adoption deferred until 1.0](/decisions/022-koota-post-1-0) defers koota adoption to koota 1.0).
+
+**Forecloses:** Arbitrary TypeScript object shapes as components in `@alumic/ecs`. That escape hatch exists — just don't use the ECS for those components.
+
+## Related
+
+- Specs: [Alumic](/), [Design Principles](/concepts/principles), [Glossary](/concepts/glossary), [Three-Layer Data Model](/concepts/three-layer-model), [What Alumic Is Not](/concepts/what-alumic-is-not), [Data Formats](/reference/data-formats), [Roadmap](/concepts/roadmap)
+- Findings resolved: audit-2 #08, audit-1 D1.
+- Depends on: [ADR-022 koota adoption deferred until 1.0](/decisions/022-koota-post-1-0).

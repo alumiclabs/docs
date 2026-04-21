@@ -1,0 +1,288 @@
+---
+title: "Canvas and Workspace"
+description: "Infinite 2D spatial canvas, portal nodes, graph references."
+icon: "square-dashed"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field), [ADR-015 Canvas persistence goes through the entity database](/decisions/015-canvas-via-entity-db), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)
+</Info>
+
+## Overview
+
+Alumic includes a **Figma-like infinite canvas** — a spatial workspace where users organize, plan, and navigate their creative projects. The canvas is one of several top-level modes in the application, sitting alongside the game viewport, graph editors, UI designer, and vector editor. Users switch between modes depending on the task at hand.
+
+The canvas serves as a spatial reasoning tool and navigation hub. Game levels, documents, asset boards, and design artifacts can all be placed as nodes on the canvas, providing a bird's-eye view of the project. Level instances act as **portals** — interactive bookmarks that open directly into the 3D game viewport when activated.
+
+## Product Modes
+
+Alumic is a multi-mode creative tools application. Each mode is a top-level view optimized for a specific workflow:
+
+| Mode | Purpose | Primary Tool |
+|------|---------|-------------|
+| **Canvas** | Spatial planning, navigation, project overview | Infinite 2D canvas with embedded nodes |
+| **Game Viewport** | 3D scene editing and playtesting | Three.js rendered scene with game systems |
+| **Graph Editor** | Authoring dialogue, quests, flow graphs | Visual node-and-edge graph editor |
+| **UI Designer** | WYSIWYG HUD and game UI authoring | Yoga-based layout designer |
+| **Vector Editor** | Icon, sprite, and UI asset design | SVG/vector drawing tools |
+| **Asset Browser** | Managing game assets | Grid/list view with preview |
+
+Users switch between modes via a mode switcher (tab bar, sidebar, or command palette). The current mode fills the main viewport. Some modes can be split-paneled or opened in secondary windows.
+
+## Canvas Architecture
+
+### Canvas Renderer
+
+The infinite canvas uses a dedicated 2D rendering pipeline (separate from the Three.js game renderer). Options:
+
+1. **HTML/CSS + Canvas hybrid** — DOM elements for UI nodes, `<canvas>` for connections and decorations. Best for text-heavy content and accessibility.
+2. **WebGL 2D** — Everything rendered in WebGL via a 2D camera. Best for performance with many nodes.
+3. **Canvas 2D API** — Standard `<canvas>` with the 2D context. Middle ground.
+
+The choice is an implementation decision, but the architecture should abstract the canvas renderer behind an interface (similar to `RenderKernel`) to allow future optimization.
+
+### Canvas Coordinate System
+
+```
+Canvas Space (infinite)
+├── Viewport (visible window, panning + zoom)
+│   ├── Nodes (positioned in canvas coordinates)
+│   │   ├── Level Portals
+│   │   ├── Document Nodes
+│   │   ├── Asset Board Nodes
+│   │   ├── Design Frames (UI mockups)
+│   │   └── Freeform Notes
+│   ├── Connections (edges between nodes)
+│   └── Decorations (grid, guides, selection)
+```
+
+- **Pan**: Click-drag or middle-mouse to move the viewport
+- **Zoom**: Scroll wheel or pinch gesture. Levels of detail change at zoom thresholds
+- **Coordinates**: Floating-point (x, y) in canvas space. No fixed grid by default (optional snap-to-grid)
+
+### Canvas Nodes Are Entity Views
+
+A critical design principle: canvas nodes are **spatial views of entities**, not containers of data. The same Character entity that appears as a node on the canvas also appears in the Entity Browser sidebar. They are the same entity, seen from two different angles.
+
+This means:
+- Dragging an entity from the Entity Browser onto the canvas creates a node for it
+- Deleting a canvas node does NOT delete the entity — it removes the spatial view
+- Renaming an entity in the inspector updates its name everywhere (canvas node, browser, references)
+- Multiple canvases can reference the same entity
+- The canvas node's inspector shows the entity's full properties, references, and backlinks
+
+See spec 23 (Entity Graph) for the entity reference system that underpins this.
+
+### Node Types
+
+Nodes are spatial representations of entities on the canvas. Each node type has a renderer, an inspector integration, and interaction behaviors.
+
+#### Entity Node (Universal)
+
+Any entity can be placed on the canvas. The node renders a type-appropriate card:
+
+```typescript
+interface CanvasNode {
+  /** Which entity this node represents. */
+  entityRef: string;           // entity ID → resolved via entity database
+
+  /** Position on the canvas. */
+  position: { x: number; y: number };
+
+  /** Display size. */
+  size: { width: number; height: number };
+
+  /** Whether the node is collapsed to a compact view. */
+  collapsed: boolean;
+
+  /** Optional visual overrides. */
+  color?: string;
+  comment?: string;
+}
+```
+
+**Rendering varies by entity type:**
+- **Scene** → thumbnail of the 3D scene (level portal)
+- **Character** → portrait + name + role
+- **Dialogue** → mini graph preview
+- **Lore** → title + first few lines of body text
+- **Quest** → title + completion state
+- **Item** → icon + name + key stats
+- **UILayout** → thumbnail of the layout
+
+**Behaviors:**
+- **Double-click** → navigates to the entity (focus stack push, appropriate editor opens)
+- **Right-click** → context menu (Open, Open in Split, Remove from Canvas, Go to Entity)
+- **Drag** → reposition on canvas
+- **Select** → inspector shows the entity's properties + references + backlinks
+- **Drag from Entity Browser** → creates a new node for that entity on the canvas
+
+#### Freeform Note
+
+The only canvas node that is NOT an entity reference. It's ephemeral text for planning.
+
+```typescript
+interface FreeformNote {
+  type: 'note';
+  text: string;
+  color: string;
+  position: { x: number; y: number };
+  size: { width: number; height: number };
+}
+```
+
+#### Annotation (on Level Portals)
+
+Scene entity nodes can have **annotations** — spatial markers that link to other entities. When viewing the canvas at a zoomed-in level, annotations appear as pins on the scene thumbnail. Each annotation references another entity (a Lore entry, a Character, a Quest objective).
+
+```typescript
+interface SceneAnnotation {
+  /** Position within the scene thumbnail (0-1 normalized). */
+  position: { x: number; y: number };
+
+  /** Entity this annotation links to. */
+  entityRef: string;
+
+  /** Short label displayed on hover. */
+  label: string;
+}
+```
+
+This is how a 3D world map gets annotations that link back to lore bible documents — each annotation is a spatial marker on a scene node that references a Lore entity. Click the annotation to navigate to the lore entry. The lore entry's backlinks show which scenes annotate it.
+
+#### Design Frame
+
+A UI/HUD design frame. Represents a screen or component being designed in the UI Designer. Can be previewed inline on the canvas or opened in the UI Designer mode.
+
+```typescript
+interface DesignFrameNode {
+  type: 'design-frame';
+  designId: string;            // references a UI design document
+  label: string;
+  position: { x: number; y: number };
+  size: { width: number; height: number };
+}
+```
+
+#### Graph Reference
+
+A reference to a dialogue, quest, or flow graph. Displays a minimap of the graph. Double-clicking opens it in the Graph Editor.
+
+```typescript
+interface GraphRefNode {
+  type: 'graph-ref';
+  graphId: string;
+  graphType: 'dialogue' | 'quest' | 'flow' | 'skill-tree';
+  label: string;
+  position: { x: number; y: number };
+  size: { width: number; height: number };
+}
+```
+
+#### Freeform Note
+
+A simple sticky-note style text block.
+
+```typescript
+interface FreeformNote {
+  type: 'note';
+  text: string;
+  color: string;
+  position: { x: number; y: number };
+  size: { width: number; height: number };
+}
+```
+
+### Connections
+
+Nodes can be connected with edges to show relationships:
+
+```typescript
+interface CanvasConnection {
+  id: string;
+  fromNodeId: string;
+  toNodeId: string;
+  label?: string;
+  style: 'solid' | 'dashed' | 'arrow';
+  color?: string;
+}
+```
+
+Examples:
+- Level Portal → Level Portal: "scene transition"
+- Design Frame → Level Portal: "this HUD is used in this level"
+- Graph Reference → Level Portal: "this dialogue plays in this scene"
+
+### Canvas Document
+
+The entire canvas state is persisted as a single document:
+
+```json
+{
+  "$format": "alumic-canvas",
+  "$version": 1,
+  "viewport": { "x": 0, "y": 0, "zoom": 1.0 },
+  "nodes": [ /* ... */ ],
+  "connections": [ /* ... */ ],
+  "groups": [ /* ... */ ]
+}
+```
+
+### Persistence
+
+`CanvasBoard` is an **entity type** ([Entity Graph](/reference/entity-graph)) — it uses the same persistence pipeline as every other entity. There is no bespoke canvas file format or directory separate from the entity database.
+
+- **SaaS (primary):** the canvas state lives as an entity row in Postgres. `data` holds `{ viewport, nodes, connections, groups }`; `editor_metadata` ([ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field)) holds presentation preferences (grid snap, last-used tool). Writes go through the standard `PATCH /api/entities/:id` endpoint.
+- **On-prem / file export:** serializes as `<board-id>.entity.json` in `data/entities/canvases/`. Import reads the same format.
+- **Save slots** ([Save System](/reference/save-system)) **do not** include canvas state. Canvas is authoring data, same tier as characters and dialogues. See [ADR-015 Canvas persistence goes through the entity database](/decisions/015-canvas-via-entity-db).
+
+Large boards (hundreds of nodes) use debounced writes — the editor batches position/connection edits over ~500ms of quiet before sending a single entity update. Debounced writes are a **shared editor convention**: the graph editor, document editor, UI designer, and spec-sheet forms all use the same debouncer to coalesce rapid edits into a single PATCH with one `If-Match` version ([ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)). `Cmd+Z` and `Cmd+S` flush the pending write.
+
+## Integration with Other Modes
+
+### Canvas → Game Viewport
+
+Double-clicking a Level Portal switches to Game Viewport mode with that scene loaded. A breadcrumb or back button returns to the canvas at the same viewport position.
+
+### Canvas → Graph Editor
+
+Double-clicking a Graph Reference opens the graph in Graph Editor mode. The canvas remembers which graphs are open and can show their edit state (modified indicator).
+
+### Canvas → UI Designer
+
+Double-clicking a Design Frame opens it in UI Designer mode. Changes in the designer update the canvas thumbnail.
+
+### Canvas → Vector Editor
+
+Assets created in the Vector Editor can be dragged onto Asset Board nodes. The vector editor can be opened from any asset reference on the canvas.
+
+## Spatial Reasoning Use Cases
+
+The canvas enables workflows that other tools handle poorly:
+
+1. **World map planning** — Place Level Portals to represent areas of a game world. Connect them to show navigation paths. Add notes about each area's theme, enemies, loot.
+
+2. **Narrative flow** — Arrange dialogue and quest graph references to show the overall story arc. Connect them to show dependencies and unlock sequences.
+
+3. **UI inventory** — Place Design Frames for every screen in the game (main menu, HUD, inventory, settings). Connect them to show navigation flows.
+
+4. **Asset organization** — Group reference images, concept art, and audio samples on Asset Boards near the Level Portals they belong to.
+
+5. **Sprint planning** — Place freeform notes with task lists near the features they relate to. Track progress spatially.
+
+## Phasing
+
+The infinite canvas is **not a Phase 1 deliverable**. It requires the core game systems to be functional first. Estimated timeline:
+
+| Feature | Phase | Rationale |
+|---------|-------|-----------|
+| Basic canvas renderer (pan, zoom, nodes) | Phase 3 | After core plugin API stabilizes |
+| Level portals with thumbnails | Phase 4 | Requires game viewport and scene system |
+| Document and note nodes | Phase 3 | Simple DOM-based rendering |
+| Graph references | Phase 4 | Requires graph editor |
+| Design frame integration | Phase 4 | Requires UI designer |
+| Asset boards | Phase 4 | Requires asset browser |
+| Connections and grouping | Phase 3 | Core canvas feature |
+| Canvas persistence and undo | Phase 3 | Foundational for the workspace |
+
+The canvas builds incrementally. Phase 3 delivers a usable spatial workspace with notes and connections. Phase 4 adds the rich integrations with other modes.

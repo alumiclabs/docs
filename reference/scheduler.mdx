@@ -1,0 +1,351 @@
+---
+title: "Scheduler"
+description: "Three-phase tick (PreUpdate → Update → PostUpdate) and system ordering."
+icon: "clock"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-009 Event bus is strictly synchronous](/decisions/009-synchronous-event-bus), [ADR-012 Scheduler appends scene-scope systems to end of phase](/decisions/012-scheduler-append-on-push)
+</Info>
+
+## Overview
+
+The scheduler manages per-frame system execution across three ordered phases. Every system function registered with the scheduler runs exactly once per tick, in its declared phase, in insertion order within that phase.
+
+The scheduler does not own the tick loop — the `App` class calls `scheduler.tick(tickContext)` each frame. The scheduler just executes the registered systems.
+
+## Three Phases
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    One Tick                           │
+│                                                      │
+│  ┌──────────┐   ┌──────────┐   ┌────────────┐      │
+│  │PreUpdate │ → │  Update  │ → │ PostUpdate │      │
+│  │          │   │          │   │            │      │
+│  │• Input   │   │• Game    │   │• Cleanup   │      │
+│  │• Network │   │  logic   │   │• Render    │      │
+│  │• Anim    │   │• Physics │   │• Events    │      │
+│  │  sample  │   │• AI      │   │  flush     │      │
+│  │• Begin   │   │• State   │   │• Snapshot  │      │
+│  │  frame   │   │  machines│   │            │      │
+│  └──────────┘   └──────────┘   └────────────┘      │
+│                                                      │
+└─────────────────────────────────────────────────────┘
+```
+
+### Phase.PreUpdate (0)
+
+Runs before game logic. Used for:
+- **Input polling** — Read keyboard, mouse, gamepad state
+- **Network receive** — Process incoming network messages
+- **Animation sampling** — Sample animation curves at the current time
+- **Render begin frame** — Prepare the renderer for the upcoming frame
+
+### Phase.Update (1)
+
+The main game logic phase. Used for:
+- **Game systems** — Combat, dialogue, quests, inventory management
+- **Physics step** — Advance the physics simulation
+- **AI decisions** — Run behavior trees, utility AI, pathfinding
+- **State machine transitions** — Advance FSM/HSM states
+
+### Phase.PostUpdate (2)
+
+Runs after game logic. Used for:
+- **Render** — Submit the frame to the GPU
+- **Cleanup** — Remove dead entities, flush deferred operations
+- **State snapshotting** — Capture state for save/load or networking
+- **Debug/profiling** — Record frame timing, update debug panels
+
+> The event bus is synchronous ([ADR-009 Event bus is strictly synchronous](/decisions/009-synchronous-event-bus), [Event Bus](/reference/event-bus)): there is no kernel-level event queue or "event flush" step. Game code that batches events during Update owns its own buffer and processes it here.
+
+## API
+
+### Phase Enum
+
+```typescript
+export enum Phase {
+  PreUpdate  = 0,
+  Update     = 1,
+  PostUpdate = 2,
+}
+```
+
+### SystemFn
+
+```typescript
+/**
+ * A system function that runs every tick at its registered phase.
+ * Receives the TickContext with dt, elapsed time, and frame number.
+ */
+export type SystemFn = (tick: TickContext) => void;
+```
+
+### TickContext
+
+```typescript
+export interface TickContext {
+  /** Seconds since last tick. Clamped to max 0.1s. */
+  readonly dt: number;
+
+  /** Total elapsed seconds since App.boot(). */
+  readonly elapsed: number;
+
+  /** Current frame number (monotonically increasing from 0). */
+  readonly frame: number;
+}
+```
+
+### defineSystem
+
+```typescript
+/**
+ * Create a system definition for use in plugins.
+ * This is a convenience factory that creates a labeled SystemEntry.
+ *
+ * @param phase - Which phase this system runs in
+ * @param fn - The system function
+ * @param label - Human-readable label for debugging (optional but recommended)
+ * @returns A SystemEntry descriptor
+ *
+ * @example
+ * const movementSystem = defineSystem(Phase.Update, (tick) => {
+ *   for (const entity of entities) {
+ *     entity.position.x += entity.velocity.x * tick.dt;
+ *     entity.position.y += entity.velocity.y * tick.dt;
+ *   }
+ * }, 'MovementSystem');
+ */
+export function defineSystem(
+  phase: Phase,
+  fn: SystemFn,
+  label?: string,
+): SystemEntry;
+```
+
+### SystemEntry
+
+```typescript
+export interface SystemEntry {
+  /** Unique identifier for this system entry. */
+  readonly id: symbol;
+
+  /** Which phase this system runs in. */
+  readonly phase: Phase;
+
+  /** The system function. */
+  readonly fn: SystemFn;
+
+  /** Human-readable label for debugging and profiling. */
+  readonly label: string;
+}
+```
+
+### Scheduler Interface
+
+```typescript
+export interface Scheduler {
+  /**
+   * Register a system at a given phase.
+   * Returns a Disposable to unregister it.
+   * Systems within the same phase run in insertion order.
+   */
+  add(phase: Phase, fn: SystemFn, label?: string): Disposable;
+
+  /** Remove a system by its entry. */
+  remove(entry: SystemEntry): void;
+
+  /**
+   * Execute all systems in phase order:
+   * PreUpdate → Update → PostUpdate
+   */
+  tick(tick: TickContext): void;
+
+  /** List all registered system entries (for debugging). */
+  entries(): readonly SystemEntry[];
+
+  /** Remove all systems. */
+  clear(): void;
+}
+
+/** Create a new Scheduler instance. */
+export function createScheduler(): Scheduler;
+```
+
+## Execution Order
+
+### Within a Phase: Insertion Order
+
+Systems within the same phase execute in the order they were added. Since plugins `build()` in topological dependency order, a system registered by plugin A (which depends on plugin B) will run after plugin B's systems within the same phase.
+
+```typescript
+// Plugin B (no dependencies) — builds first
+ctx.schedule(Phase.Update, physicsStep, 'PhysicsStep');
+
+// Plugin A (depends on B) — builds second
+ctx.schedule(Phase.Update, combatTick, 'CombatTick');
+
+// Execution order within Phase.Update:
+// 1. PhysicsStep   (registered first)
+// 2. CombatTick    (registered second)
+```
+
+### Across Phases: Strict Ordering
+
+Phases always execute in order: `PreUpdate → Update → PostUpdate`. All systems in `PreUpdate` complete before any `Update` system runs.
+
+### Runtime Registration (post-boot)
+
+Systems registered during a scope entry that happens **after boot** (a `pushScene`, `startSession`, or `addPlayer`) are **appended to the end of their phase**. Dependency-order interleaving applies only to registrations made during `App.boot()`. If a late-registering Scene subsystem depends on another Scene subsystem, express the dependency via `ctx.get()` inside the subsystem body — not via scheduler order. See [ADR-012 Scheduler appends scene-scope systems to end of phase](/decisions/012-scheduler-append-on-push).
+
+### No Priority Numbers
+
+Alumic deliberately avoids priority-based ordering (e.g., `priority: 100`). Priority numbers lead to magic number conflicts and are hard to reason about across packages. Instead:
+
+- **Dependency declaration** at the plugin level controls overall ordering
+- **Phase selection** controls coarse timing (before, during, or after game logic)
+- **Insertion order** controls fine-grained ordering within a phase
+
+If two systems must run in a specific order within the same phase, their plugins should declare a dependency relationship.
+
+## Integration With Subsystems
+
+Subsystems with a `tick()` method are automatically registered with the scheduler during scope initialization:
+
+```typescript
+const PhysicsSubsystem = defineSubsystem(Scope.Scene, (ctx) => ({
+  init() {
+    return { world: new PhysicsWorld() };
+  },
+  tick(state, { dt }) {
+    state.world.step(dt);
+  },
+  tickPhase: Phase.PreUpdate, // runs before game logic
+}));
+```
+
+When the scene is pushed:
+1. `PhysicsSubsystem.init()` is called
+2. `PhysicsSubsystem.tick()` is registered with the scheduler at `Phase.PreUpdate`
+
+When the scene is popped:
+1. `PhysicsSubsystem.tick()` is removed from the scheduler
+2. `PhysicsSubsystem.deinit()` is called
+
+When a scene is suspended (another scene pushed on top):
+1. `PhysicsSubsystem.tick()` is paused (not removed — it resumes when the scene resumes)
+
+## Error Handling
+
+If a system function throws during `tick()`:
+
+1. The error is caught by the scheduler
+2. The error is emitted on the `TickError` channel:
+   ```typescript
+   TickError.emit({
+     system: 'MovementSystem',
+     error: thrownError,
+   });
+   ```
+3. Execution continues with the next system
+4. The failing system is NOT removed — it will be called again next tick
+
+In development, the `TickError` channel is subscribed to by the debug panel, which displays the error inline. In production, errors are logged to the console.
+
+### Why Not Remove Failing Systems?
+
+A system might throw due to a transient condition (e.g., a missing entity that will exist next frame after spawning). Automatically removing it would be overly aggressive. If a system truly needs to be disabled, it should catch its own errors or be removed explicitly.
+
+### Subscribing to TickError
+
+Templates should subscribe to `TickError` during boot and surface failures through whatever channel matches their environment. The dev-template pattern:
+
+```typescript
+// In template entry, before app.boot() returns:
+TickError.on(({ system, error }) => {
+  if (import.meta.env.DEV) {
+    // Dev: surface inline in the debug panel, throw for stack visibility
+    debugPanel.logTickError(system, error);
+    console.error(`[TickError:${system}]`, error);
+  } else {
+    // Prod: telemetry and silent continue
+    telemetry.capture('tick_error', { system, message: error.message });
+  }
+});
+```
+
+Without a subscriber, errors are logged once via `console.error` and execution continues (see [CLI](/guides/cli)-tooling-and-dx.md for the dev-panel wiring).
+
+## Profiling Support
+
+The scheduler tracks timing for each system entry:
+
+```typescript
+export interface SystemTiming {
+  readonly entry: SystemEntry;
+  /** Milliseconds spent in this system last tick. */
+  readonly lastMs: number;
+  /** Average milliseconds over the last N ticks. */
+  readonly avgMs: number;
+  /** Maximum milliseconds over the last N ticks. */
+  readonly maxMs: number;
+}
+
+// Available via the scheduler:
+scheduler.timings(): readonly SystemTiming[];
+```
+
+This data feeds the debug panel's performance view, showing which systems consume the most frame time.
+
+## Usage Examples
+
+### Plugin Registering Systems
+
+```typescript
+export const renderPlugin = definePlugin({
+  meta: { name: 'Render', version: '0.1.0' },
+  build(ctx) {
+    // PreUpdate: prepare the frame
+    ctx.schedule(Phase.PreUpdate, (tick) => {
+      const kernel = ctx.get(RenderSubsystem);
+      kernel.beginFrame(tick);
+    }, 'RenderBeginFrame');
+
+    // PostUpdate: present to screen
+    ctx.schedule(Phase.PostUpdate, (tick) => {
+      const kernel = ctx.get(RenderSubsystem);
+      kernel.render(tick);
+    }, 'RenderPresent');
+  },
+});
+```
+
+### Dynamic System Registration
+
+Systems can be added and removed at runtime:
+
+```typescript
+// Add a debug system dynamically
+const unsub = ctx.schedule(Phase.PostUpdate, (tick) => {
+  console.log(`Frame ${tick.frame}: ${(tick.dt * 1000).toFixed(1)}ms`);
+}, 'FrameLogger');
+
+// Later, remove it
+unsub();
+```
+
+### Conditional System Execution
+
+A system can internally skip work based on game state:
+
+```typescript
+ctx.schedule(Phase.Update, (tick) => {
+  const state = ctx.get(GameStateSubsystem);
+  if (state.paused) return; // skip when paused
+
+  // ... actual logic
+}, 'GameLogic');
+```
+
+This is preferred over dynamically adding/removing the system, as it avoids the overhead of modifying the scheduler's internal arrays.

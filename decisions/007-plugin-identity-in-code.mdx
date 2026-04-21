@@ -1,0 +1,35 @@
+---
+title: "ADR-007: Plugin identity lives in code via definePlugin()"
+description: "Plugin identity and metadata live **in code** via `definePlugin({ meta, build })` and `defineTemplate({ ..."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Research documents proposed three incompatible positions for plugin manifests: (a) a `package.json` `alumic` subkey carrying `{ type, entry, editorEntry, templateSchema, assets, displayName, tags }`, (b) a separate `alumic.json` manifest file per plugin, (c) an `export default` object satisfying an `AlumicPlugin` interface.
+
+The spec settled on option (c) but extended it with `definePlugin({...})` — a factory for type inference. Metadata (`name`, `version`, `dependencies`, `unique`) lives on the plugin object's `meta` field. No `alumic` subkey, no `alumic.json`.
+
+The question was whether to adopt the `package.json` subkey for static discovery (the editor/CLI needs `editorEntry` and `templateSchema` without loading TS) or canonicalize on code.
+
+## Decision
+
+Plugin identity and metadata live **in code** via `definePlugin({ meta, build })` and `defineTemplate({ ... })`. There is no `alumic` subkey in `package.json` and no separate `alumic.json`.
+
+Package-level identity — name, version, dependency list — is declared in the plugin's `meta` object, which Alumic's registry/marketplace ([ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4)) reads by importing and evaluating the plugin module. Discovery is always dynamic.
+
+## Consequences
+
+**Enables:** One source of truth for a plugin's identity. `definePlugin` provides TypeScript-level validation of the meta shape. The marketplace serves plugin bundles and reads their declared meta by loading them in an isolated context.
+
+**Obligates:** There is no way to discover a plugin's metadata without loading its entry module. For the marketplace, this means builds must emit a `meta` snapshot during publish (plugin author runs `alumic publish`, CLI extracts `meta` at build time and ships it alongside the bundle).
+
+**Forecloses:** A static manifest that tools can read without parsing TS. The cost is small — the plugin bundle itself is needed anyway to use the plugin.
+
+## Related
+
+- Specs: [Plugin System](/reference/plugin-system), [Writing a Plugin](/guides/writing-a-plugin), [Template System](/reference/template-system)
+- Findings resolved: audit-1 A3, B4; audit-2 #06, #07.
+- Informs: [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4).

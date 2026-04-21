@@ -1,0 +1,59 @@
+---
+title: "ADR-051: Server tolerance of newer-client schemas; cursor-too-old error shape"
+description: "Server tolerance of newer-client schemas; cursor-too-old error shape"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation) defined schema negotiation for the case where a client runs an **older** schema than the server — the server downgrades the response and marks it with `X-Alumic-Schema-Downgraded`. It did not define the inverse direction: a client running a **newer** schema against a server that has not yet deployed the matching migration. Engine plugins auto-update independently of server deploys, and a newer plugin writing v5 `Dialogue` fields against a v4 server would be rejected as a `422 invalid` schema parse, with no signal that the cause is protocol skew.
+
+Separately, [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol) hints that clients resuming with `?since=<cursor>` past the server's retention window (default 30 days) "fall back to a cold snapshot" — but the error shape that tells the client to do so was never specified.
+
+## Decision
+
+### Newer-client tolerance
+
+When `X-Alumic-Schema-Version` on a request is **ahead** of the server's current registry, the server strips unknown fields on write rather than rejecting:
+
+- Write succeeds against the server's current shape.
+- Response carries `X-Alumic-Schema-FieldsDropped: data.foo,data.bar` naming the dropped paths.
+- Server emits a `schema.client-ahead` metric for the workspace/route.
+
+If the newer client also attempts to reference a **new entity type** the server doesn't know, the write fails with `409 Protocol Outdated` and the same shape as the older-client `409 Protocol Outdated` case ([ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation)). Unknown-type writes are a structural break; unknown-field writes are forward-compat noise.
+
+### Cursor-too-old
+
+Stale sync cursors return `410 Gone`:
+
+```http
+HTTP/1.1 410 Gone
+Content-Type: application/json
+
+{
+  "error": "cursor-too-old",
+  "message": "The provided cursor is older than the project's retention window.",
+  "details": {
+    "retentionDays": 30,
+    "snapshotHint": "/api/projects/:pid/snapshot"
+  }
+}
+```
+
+Clients treat `410 Gone` on `/events` as "discard cursor and re-pull via cold snapshot." The engine plugin (spec 25) explicitly handles this as a rebuild-mirror trigger.
+
+## Consequences
+
+**Enables:** Mixed fleets in either direction — older clients downgraded ([ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation)), newer clients field-stripped. Engine-plugin cold-snapshot fallback is a typed error, not a silent 404.
+
+**Obligates:** The backend field-strip path runs structural diff per entity-type Zod schema on write to enumerate dropped paths. Client SDKs surface `X-Alumic-Schema-FieldsDropped` as a warning (debug-panel line, CLI stderr). Clients include the `410 Gone` handler in the reconnect loop — without it, a stale cursor retries indefinitely.
+
+**Forecloses:** Rejecting every unknown-field write as invalid. Clients on head tolerate a lagging server deploy.
+
+## Related
+
+- Specs: [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints), [Engine Plugin](/platform/engine-plugin)
+- Depends on: [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation).
+- Informs: [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect).

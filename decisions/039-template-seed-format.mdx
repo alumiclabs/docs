@@ -1,0 +1,87 @@
+---
+title: "ADR-039: Templates ship seed content under `data/entities/` + `data/assets/`"
+description: "A template package's **seed content** lives under `data/` in the same shape that `alumic export` (ADR-035) emits:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4) promises a marketplace that distributes templates. [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid) says a new project from a template has a server-issued UUID and seed entities cloned into it. [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side) says publish runs server-side. None of these specify the on-disk shape that a template author's git tree must take for their content to become seed entities.
+
+Spec 17 (template system) and spec 20 (tooling) documented `templates/<name>/data/dialogues/*.graph.json` and `templates/<name>/public/assets/{models,textures,audio}/` as the convention — which predates the SaaS pivot and contradicts [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage) (asset bytes go through object storage, not the bundler).
+
+Without a defined seed format, the publish pipeline can't ingest a template deterministically, and template authors guess at layouts.
+
+## Decision
+
+A template package's **seed content** lives under `data/` in the same shape that `alumic export` ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)) emits:
+
+```
+templates/<name>/
+├── package.json
+├── tsconfig.json
+├── src/                       # author-time code (Vite, SolidJS shell) — NOT shipped to end users
+├── template.ts                # defineTemplate() manifest
+├── data/                      # ← seed content, ingested at template install
+│   ├── entities/
+│   │   ├── characters/*.entity.json
+│   │   ├── dialogues/*.entity.json
+│   │   ├── quests/*.entity.json
+│   │   ├── scenes/*.entity.json
+│   │   └── ...
+│   ├── strings/
+│   │   └── *.strings.csv
+│   └── assets/
+│       ├── manifest.json      # [{ id, sha256, kind, contentType, bundle }, ...]
+│       └── blobs/<first-2>/<full-sha>
+└── README.md
+```
+
+**Rules:**
+
+- `data/` is the only directory the publish pipeline reads for seed content. Everything else is template-author source (shipped to end users only as compiled JS if they install via CLI, not via the marketplace).
+- `data/entities/` uses the `.entity.json` shape of [entity-graph](/reference/entity-graph). Cross-entity references are entity IDs; asset references are asset IDs ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)).
+- `data/assets/manifest.json` + `blobs/` is the content-addressed export format from [Asset Management](/reference/asset-management). The publish pipeline uploads blobs to object storage and mints fresh asset IDs in the target project (configurable via `--preserve-ids`).
+- Legacy `.graph.json`, `.def.json`, `.layout.json` files under `data/` are still accepted as ingest input — each is converted to an `.entity.json` row on install (publish pipeline runs the same conversion `alumic import` uses).
+
+### Publish pipeline behavior
+
+`alumic publish` reads `data/`, runs the same Zod validation the backend's write path does ([ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation)), emits the template as a signed artifact ([ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing)):
+
+```
+template@version/
+├── meta.json           # name, displayName, description, version, author
+├── seed/               # copy of data/ with normalized shapes
+│   ├── entities/
+│   ├── strings/
+│   └── assets/
+└── artifacts/          # engine-portable code ([ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side)) if applicable
+```
+
+### Install behavior
+
+Installing a template into a new project (browser "New Project" or `alumic create`):
+
+1. Backend mints project UUID ([ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid)).
+2. Backend unpacks `seed/assets/` → uploads blobs → creates Asset entities.
+3. Backend rewrites asset-ID references inside `seed/entities/` from template-local IDs to the newly-minted project-scoped asset IDs (unless `--preserve-ids`).
+4. Backend inserts entities, running the full validation + ref-extraction pipeline.
+5. Backend copies `seed/strings/` into the project's string tables.
+
+Template-author source code (`src/`, `template.ts`, HTML entry) is never shipped to end-user projects. End-user projects get a clean backend row; authoring happens through the browser editor.
+
+## Consequences
+
+**Enables:** Deterministic template ingestion. Template authors have one canonical layout. `alumic export` → edit → `alumic publish` round-trips losslessly. On-prem seeding uses the same format.
+
+**Obligates:** Spec 17 and spec 20's "template package layout" sections update to document `data/` (no more `public/assets/`). First-party templates in the monorepo migrate their content to this shape. Publish pipeline grows a migration step that accepts the legacy layout for one release cycle and emits a deprecation warning.
+
+**Forecloses:** Shipping raw binary assets under `public/` for Vite to bundle. Asset bytes live in `data/assets/blobs/` and flow through the upload pipeline.
+
+## Related
+
+- Specs: [Project Structure](/guides/project-structure), [Asset Management](/reference/asset-management), [Template System](/reference/template-system), [CLI](/guides/cli), [Validation](/guides/validation), [Testing](/guides/testing), [Debugging](/guides/debugging), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware).
+- Informs: Phase 4 marketplace scope.

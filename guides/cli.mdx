@@ -1,0 +1,161 @@
+---
+title: "CLI"
+description: "Every alumic * command — login, create, push, pull, publish."
+icon: "terminal"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation), [ADR-044 Single-driver arbitration for plugin swap()](/decisions/044-swap-driver-arbitration), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware), [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth), [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape), [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag), [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation), [ADR-008 Line IDs are author-written; CLI extracts .strings.csv](/decisions/008-line-ids-authored), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing)
+</Info>
+
+## Development Server
+
+### Vite + Bun
+
+Templates use Vite (run via Bun) for the development server. Vite provides:
+- **Instant startup** — No bundling on startup; files served on demand
+- **Hot Module Replacement** — Changes to SolidJS components and game code update instantly
+- **Native TypeScript** — Bun + Vite handle TypeScript without a separate compile step
+- **Optimized builds** — Production builds with tree-shaking and code splitting
+
+### Template Dev Server Setup
+
+```typescript
+// templates/topdown-action/vite.config.ts
+import { defineConfig } from 'vite';
+import solidPlugin from 'vite-plugin-solid';
+
+export default defineConfig({
+  plugins: [solidPlugin()],
+  resolve: {
+    conditions: ['development', 'browser'],
+  },
+  server: {
+    port: 5173,
+    open: true,
+  },
+  build: {
+    target: 'esnext',
+    minify: 'esbuild',
+  },
+});
+```
+
+### Running the Dev Server
+
+```bash
+# From a template directory
+bun dev        # → bunx --bun vite
+
+# From the monorepo root
+bun run --filter @alumic/template-topdown-action dev
+```
+
+### Hot Reload Behavior
+
+Two distinct hot-reload systems operate at different layers. Do not conflate them.
+
+**Local template-author HMR (Vite, during `alumic dev`):** applies when a template author is editing TypeScript / TSX / CSS on their own machine.
+
+| Change Type | Behavior |
+|------------|----------|
+| SolidJS component (.tsx) | HMR — component re-renders, state preserved |
+| Game system (.ts) | Full reload (future: plugin `swap()` for HMR) |
+| CSS | HMR — styles update instantly |
+| package dependency | Full reload |
+
+**Content live reload ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), sync snapshot + event-stream):** applies in the hosted editor, other browser tabs, and the engine plugin ([Engine Plugin](/platform/engine-plugin)) whenever authored entities change — edits in alumic.app by any client.
+
+| Change Type | Behavior |
+|------------|----------|
+| Entity created/updated/deleted | `EntityChangeEvent` via `GET /api/projects/:pid/events?stream=sse`; subscribed clients invalidate cache, re-render |
+| Asset uploaded/replaced | Event carries new asset; re-resolve via signed URL ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)) |
+| Schema manifest changed | Clients re-fetch via `GET /api/schema`; engine plugin may refuse on major-version mismatch ([ADR-030 Schema and protocol version negotiation](/decisions/030-schema-version-negotiation)) |
+
+These are independent. Vite HMR is for *code*; the event stream is for *content*.
+
+**Arbitration when both fire.** During `alumic dev`, the Vite HMR adapter is the single `AlumicPlugin.swap()` driver. When a marketplace `schema.changed` event arrives over the sync stream while HMR is active, the sync-stream handler records it as a pending swap and returns; the Vite adapter drains the pending queue on its next swap cycle. Outside `alumic dev` (production hosted editor, engine plugin), the sync-stream handler is the only swap driver. See [ADR-044 Single-driver arbitration for plugin swap()](/decisions/044-swap-driver-arbitration).
+
+
+## CLI Tooling
+
+The CLI ships alongside the backend ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware), Phase 2). Phase 1 in-monorepo iteration uses `bun run --filter` directly; the public `alumic` binary becomes the canonical entry point once the backend lands.
+
+### @alumic/cli
+
+```bash
+# Install globally
+bun add -g @alumic/cli
+
+# ── Auth & workspace ([ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)) ──
+alumic login                    # OAuth device-flow → stores a scoped PAT
+alumic logout
+alumic whoami
+alumic workspaces               # list workspaces the current token can see
+
+# ── Project lifecycle ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)) ──
+alumic create my-game --template topdown-action
+                                # Mints a server-issued UUID ([ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid)); writes project.json
+                                # + a local working directory bound to that UUID
+alumic clone <project-id>       # local working copy of an existing SaaS project
+alumic pull                     # refresh local .entity.json export from server
+alumic push                     # upload local edits; If-Match concurrency per [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)
+alumic import <dir>             # create a new project from a file-shaped export; uploads
+                                # entities + assets. `--into <project-id>` merges into an
+                                # existing project (rejects collisions). See [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware).
+alumic upload <artifact>        # engine-baked content return path ([Engine Plugin](/platform/engine-plugin), Phase 4+). Uses
+                                # If-Match + X-Alumic-Write-Id; rate-limited per [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag).
+alumic push --from-engine <dir> # upload engine-derived artifacts (baked scenes, thumbnails)
+                                # as Assets ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)) + entity patches ([ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)).
+                                # Resolves projectId from .alumic/binding.json ([Engine Plugin](/platform/engine-plugin)).
+                                # Requires a PAT with project:write scope.
+
+# ── Content authoring ──
+alumic validate                 # schema + link checks (also runs server-side on save — [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation))
+                                # offline-mode pins the schema cached by last `pull`
+alumic extract-strings          # CSV stubs for translators ([ADR-008 Line IDs are author-written; CLI extracts .strings.csv](/decisions/008-line-ids-authored))
+alumic codegen                  # type definitions from entity schemas
+alumic transpile --target unity # requests a workspace-scoped transpile from the backend
+                                # (POST /api/transpile, [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side)) and writes the artifact locally.
+                                # Requires network; publish pipeline remains authoritative.
+
+# ── Dev (template author / on-prem / desktop) ──
+alumic dev                      # Vite dev server for template packages
+alumic build                    # production build
+
+# ── Publishing ([ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side), [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing)) ──
+alumic publish                  # signs bundle, extracts schema, runs transpile, uploads to marketplace
+
+# ── Engine-side export push-back (Phase 4+, [Engine Plugin](/platform/engine-plugin)) ──
+alumic push --from-engine <path>
+                                # Uploads an engine-native export (baked scene, thumbnail
+                                # capture, built-game artifact) back to Alumic. Explicit,
+                                # manual, rate-limited per [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag). Requires project:write
+                                # scope. The engine plugin ([Engine Plugin](/platform/engine-plugin)) is read-only in Phase 4;
+                                # this command (or the web UI) is the push-back path until
+                                # Phase 5 bidirectional sync lands. Internally uses the
+                                # asset two-step upload ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)) + entity PATCH with
+                                # If-Match ([ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)), keyed on the project in the engine
+                                # project's .alumic/binding.json.
+```
+
+All commands that touch the server use the token from `alumic login` or `ALUMIC_TOKEN`. On-prem targets are selected via `ALUMIC_SERVER_URL=https://alumic.internal.example.com` or `--server`. See [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware) for the full SaaS-aware CLI decision.
+
+### Scaffolding
+
+`alumic create` is SaaS-aware by default ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)). It is not a local npm-style scaffolder — the server is the source of truth for a new project. See the command table above and [Template System](/reference/template-system) §Project Creation for the canonical flow, which maps to [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid) (server-issued UUID) and [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth) (PAT authentication).
+
+```bash
+alumic create my-game --template topdown-action
+alumic create my-game --template narrative
+alumic create my-game --template tactics
+```
+
+Each invocation:
+1. Calls `POST /api/workspaces/:id/projects { template: '<name>' }` — server mints a UUID, clones the template's seed entities, uploads seed assets.
+2. Writes a local working directory named `my-game/` with `project.json` stamped per [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid) (UUID + workspaceId).
+3. Writes template-author scaffolding (`src/`, `public/`, optional `data/entities/` export) when the template ships one.
+4. Runs `bun install` if a `package.json` is part of the template.
+5. Prints next steps.
+
+The local directory is a **mirror** of server state, not an independent source. `--offline` defers the server round-trip and leaves `project.json` un-stamped until the first `alumic push`.

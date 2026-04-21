@@ -1,0 +1,318 @@
+---
+title: "Entity Types and Extractors"
+description: "defineEntityType, the FieldType enum, and reference extractors."
+icon: "table-columns"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-016 Constant entity type replaces NumRef](/decisions/016-constant-entity), [ADR-043 Project-management entity types land Phase 3; automation Phase 4](/decisions/043-project-management-phase-3), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals), [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model), [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api)
+</Info>
+
+## Entity Type System
+
+### defineEntityType
+
+```typescript
+import { z } from 'zod';
+
+/**
+ * Define a new entity type with a name, schema, and editor association.
+ *
+ * @example
+ * export const CharacterType = defineEntityType({
+ *   name: 'Character',
+ *   icon: 'user',
+ *   editor: 'spec-sheet',      // which editor surface opens for this type
+ *   schema: z.object({
+ *     displayName: z.string(),
+ *     portrait: z.string().optional(),
+ *     role: z.enum(['protagonist', 'npc', 'antagonist', 'ambient']),
+ *     bio: z.string().optional(),
+ *     attributes: z.record(z.number()).optional(),
+ *     tags: z.array(z.string()).optional(),
+ *   }),
+ * });
+ */
+export function defineEntityType<S extends z.ZodType>(config: {
+  /** Unique type name (PascalCase by convention). */
+  name: string;
+
+  /** Icon identifier for the entity browser. */
+  icon: string;
+
+  /**
+   * Which editor surface opens when this entity is focused.
+   * Built-in editors: 'viewport-3d', 'graph', 'document', 'spec-sheet',
+   *                   'ui-designer', 'vector', 'canvas', 'table'
+   */
+  editor: string;
+
+  /** Zod schema for this entity type's data. */
+  schema: S;
+
+  /**
+   * Default data for new entities of this type.
+   * Used by "Create New..." in the entity browser.
+   */
+  defaults?: Partial<z.infer<S>>;
+}): EntityType<S>;
+```
+
+### EntityType
+
+```typescript
+export interface EntityType<S extends z.ZodType = z.ZodType> {
+  readonly name: string;
+  readonly icon: string;
+  readonly editor: string;
+  readonly schema: S;
+  readonly defaults?: Partial<z.infer<S>>;
+}
+```
+
+### Built-In Entity Types
+
+```typescript
+// ── Narrative ──
+
+export const CharacterType = defineEntityType({
+  name: 'Character',
+  icon: 'user',
+  editor: 'spec-sheet',
+  schema: z.object({
+    displayName: z.string(),
+    portrait: z.string().optional(),
+    role: z.enum(['protagonist', 'npc', 'antagonist', 'ambient']),
+    bio: z.string().optional(),
+    voice: z.string().optional(),
+    attributes: z.record(z.number()).optional(),
+    tags: z.array(z.string()).optional(),
+  }),
+});
+
+export const LoreType = defineEntityType({
+  name: 'Lore',
+  icon: 'book',
+  editor: 'document',
+  schema: z.object({
+    title: z.string(),
+    category: z.enum(['history', 'faction', 'mythology', 'geography', 'culture', 'technology']),
+    body: z.string(),              // markdown content
+    tags: z.array(z.string()).optional(),
+  }),
+});
+
+import { DialogueGraphSchema } from '@alumic/dialogue';
+
+export const DialogueType = defineEntityType({
+  name: 'Dialogue',
+  icon: 'message-circle',
+  editor: 'graph',
+  schema: DialogueGraphSchema,  // named schema from @alumic/dialogue ([Dialogue System](/reference/dialogue-system))
+});
+
+import { QuestGraphSchema } from '@alumic/flow';
+
+export const QuestType = defineEntityType({
+  name: 'Quest',
+  icon: 'compass',
+  editor: 'graph',
+  schema: QuestGraphSchema,  // named schema from @alumic/flow
+});
+
+// ── World ──
+
+export const LocationType = defineEntityType({
+  name: 'Location',
+  icon: 'map-pin',
+  editor: 'spec-sheet',
+  schema: z.object({
+    displayName: z.string(),
+    description: z.string().optional(),
+    region: z.string().optional(),
+    sceneRef: z.string().optional(),        // entity ref to a Scene
+    worldPosition: z.object({
+      x: z.number(), y: z.number(), z: z.number(),
+    }).optional(),
+    tags: z.array(z.string()).optional(),
+  }),
+});
+
+import { SceneContentSchema } from '@alumic/render';
+
+export const SceneType = defineEntityType({
+  name: 'Scene',
+  icon: 'box',
+  editor: 'viewport-3d',
+  schema: z.object({
+    displayName: z.string(),
+    // Scene runtime payload is a discriminated union of typed scene nodes
+    // (see Scene Node Schema below). Third-party scene-node types register
+    // via ctx.entities.registerSceneNodeType(). Every node declares its
+    // outbound asset refs on a typed `assetRefs: string[]` field so the
+    // built-in Scene extractor can enumerate them without walking unknown
+    // shapes — keeping asset backlinks ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)) and engine-plugin asset GC
+    // ([Engine Plugin](/platform/engine-plugin)) correct. Binary assets are always asset IDs, not paths.
+    content: SceneContentSchema,
+    thumbnail: z.string().optional(),       // asset ID
+    tags: z.array(z.string()).optional(),
+  }),
+});
+
+// ── Gameplay ──
+
+export const ItemType = defineEntityType({
+  name: 'Item',
+  icon: 'package',
+  editor: 'spec-sheet',
+  schema: z.object({
+    displayName: z.string(),
+    description: z.string().optional(),
+    icon: z.string().optional(),
+    stats: z.record(z.number()).optional(),
+    stackable: z.boolean().default(false),
+    maxStack: z.number().default(1),
+    tags: z.array(z.string()).optional(),
+  }),
+});
+
+export const AbilityType = defineEntityType({
+  name: 'Ability',
+  icon: 'zap',
+  editor: 'spec-sheet',
+  schema: z.object({
+    displayName: z.string(),
+    description: z.string().optional(),
+    icon: z.string().optional(),
+    cooldown: z.number(),
+    cost: z.object({ attribute: z.string(), amount: z.number() }).optional(),
+    tags: z.array(z.string()).optional(),
+  }),
+});
+
+// ── Design ──
+
+import { UILayoutSchema } from '@alumic/ui';
+
+export const UILayoutType = defineEntityType({
+  name: 'UILayout',
+  icon: 'layout',
+  editor: 'ui-designer',
+  schema: UILayoutSchema,  // named schema from @alumic/ui ([UI Integration](/reference/ui-integration))
+});
+
+export const IconSetType = defineEntityType({
+  name: 'IconSet',
+  icon: 'image',
+  editor: 'vector',
+  schema: z.object({
+    displayName: z.string(),
+    icons: z.array(z.object({
+      id: z.string(),
+      name: z.string(),
+      svg: z.string(),
+    })),
+    tags: z.array(z.string()).optional(),
+  }),
+});
+
+import { CanvasBoardSchema } from '@alumic/canvas';
+
+export const CanvasBoardType = defineEntityType({
+  name: 'CanvasBoard',
+  icon: 'grid',
+  editor: 'canvas',
+  schema: CanvasBoardSchema,  // named schema from @alumic/canvas ([Canvas and Workspace](/reference/canvas-and-workspace))
+});
+
+// ── Shared constants used by ability/effect tuning ([ADR-016 Constant entity type replaces NumRef](/decisions/016-constant-entity)) ──
+
+export const ConstantType = defineEntityType({
+  name: 'Constant',
+  icon: 'hash',
+  editor: 'spec-sheet',
+  schema: z.object({
+    displayName: z.string(),
+    value: z.number(),
+    unit: z.string().optional(),       // 'seconds', 'damage', etc.
+    category: z.string().optional(),   // 'combat', 'economy', 'progression'
+    tags: z.array(z.string()).optional(),
+  }),
+});
+
+// Example: an effect references a Constant entity for its damage number.
+// Effect.data.damageFrom: EntityRef { role: 'damageFrom', targetId: 'fire-damage-base', targetType: 'Constant' }
+// Resolved at cast-time by reading the Constant's `value`.
+
+// ── Project management (Phase 3, [Project Management](/reference/project-management), [ADR-043 Project-management entity types land Phase 3; automation Phase 4](/decisions/043-project-management-phase-3)) ──
+//
+// Built-in PM entity types live in @alumic/pm. Descriptors elided here; see [Project Management](/reference/project-management)
+// for full schemas.
+//
+//   IssueType          — flat work item with a 'kind' discriminator; 'entityRefs'
+//                        carries the open-ended references into the domain graph.
+//                        Editor: 'spec-sheet' (with Comments drawer + References panel).
+//   BoardType          — kanban: columns + optional lanes + filter.
+//                        Editor: 'board' (NEW).
+//   SprintType         — time-bounded iteration with startsAt / endsAt / state.
+//                        Editor: 'sprint-backlog' (NEW).
+//   MilestoneType      — date-bounded target.
+//                        Editor: 'milestone-timeline' (NEW, read-only).
+//   CommentType        — thread attached to any entity (targetEntityId is the ref).
+//                        Editor: 'spec-sheet'.
+//   ReviewRequestType  — entity wrapper around an entity_proposals row ([ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)).
+//                        Editor: 'spec-sheet'.
+//
+// An Issue's `entityRefs` field is the canonical pattern for "work item references
+// domain entity" — the ref extractor emits EntityRef rows keyed by role ('affects',
+// 'blocks', 'relates-to', 'fixes'), so backlinks on the referenced entity show
+// every Issue that points at it.
+
+// ── Actors and automation (Phase 3, [Actors and Agents](/reference/actors-and-agents), [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model)) ──
+//
+//   AgentType          — registered non-human author: kind ∈ {llm, rule, external, system}.
+//                        Carries credential hash, scopes, budget caps, rate limits.
+//                        Editor: 'spec-sheet'.
+//   AgentRunType       — invocation record: writes tagged with agent_run_id join a run.
+//                        "Revert run" reverts every write tagged with the run.
+//                        Editor: 'spec-sheet' (read-only).
+//   AutomationRuleType — Phase 4; trigger/condition/action shape. Runs as a system Agent.
+//                        Editor: 'spec-sheet'.
+```
+
+### Plugin Registration API
+
+Custom entity types and reference extractors are registered during `plugin.build(ctx)` via the `ctx.entities` namespace (see [App Lifecycle](/reference/app-lifecycle) for the full `AppContext` surface):
+
+```typescript
+ctx.entities.registerType(MyCustomEntityType);
+ctx.entities.registerExtractor('Dialogue', myDialogueExtractor);
+```
+
+Collision policy: registering a duplicate type name or a second extractor for the same type throws during boot, naming both the existing and attempted registration. Silent override would make plugin conflicts invisible. See [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api).
+
+### Custom Entity Types
+
+Plugins and templates can define additional entity types:
+
+```typescript
+// In a survival game template
+export const CraftingRecipeType = defineEntityType({
+  name: 'CraftingRecipe',
+  icon: 'tool',
+  editor: 'spec-sheet',
+  schema: z.object({
+    displayName: z.string(),
+    ingredients: z.array(z.object({
+      itemRef: z.string(),           // entity ref to Item
+      quantity: z.number(),
+    })),
+    result: z.object({
+      itemRef: z.string(),           // entity ref to Item
+      quantity: z.number(),
+    }),
+    craftingTime: z.number(),
+    tags: z.array(z.string()).optional(),
+  }),
+});
+```

@@ -1,0 +1,72 @@
+---
+title: "Architecture Decisions"
+description: "Every significant design decision, its context, and consequences."
+icon: "scale-balanced"
+---
+
+An ADR captures one load-bearing decision: the situation that motivated it, the concrete choice, and what it enables, obligates, or forecloses. The log is append-only — decisions never get edited in place; they are **superseded** by later ADRs.
+
+## Browse by category
+
+<CardGroup cols={2}>
+  <Card title="Product and phasing" icon="compass" href="/decisions/001-saas-first">
+    SaaS-first vs on-prem, phase gating, research frozen. Nine decisions anchoring the product shape.
+  </Card>
+  <Card title="Foundation and kernel" icon="cubes" href="/decisions/005-bun-workspaces">
+    Bun workspaces, xstate backing, synchronous event bus, Disposable shape. Eight.
+  </Card>
+  <Card title="Data model and validation" icon="table-columns" href="/decisions/013-server-side-validation">
+    Server-side Zod validation, layout field split, canvas via entity DB, shared variable registry. Eight.
+  </Card>
+  <Card title="Identity, auth, API" icon="key" href="/decisions/025-project-identity-server-uuid">
+    Server-issued project UUIDs, PATs, workspace metering, room tickets, CSP sandboxing, mutable Identity. Seven.
+  </Card>
+  <Card title="Sync, conflict, versioning" icon="arrows-rotate" href="/decisions/027-engine-plugin-sync-protocol">
+    Engine-plugin sync protocol, conflict shape, schema negotiation, offline semantics, entity version log. Seven.
+  </Card>
+  <Card title="Assets, engine, marketplace" icon="store" href="/decisions/029-assets-object-storage">
+    Object-storage blobs, server-side transpile, marketplace signing, plugin registration, swap arbitration. Seven.
+  </Card>
+  <Card title="Teams, actors, approvals" icon="user-shield" href="/decisions/041-actor-model">
+    Undo wire semantics, actor model, approval gates, entity ID policy, install seed pipeline. Seven.
+  </Card>
+</CardGroup>
+
+## How to read an ADR
+
+Each page uses the same template:
+
+<Steps>
+  <Step title="Status line">
+    An `<Info>` block near the top gives the current status (`Accepted`, `Superseded`, `Deprecated`) and the date. `Supersedes` and `Superseded by` appear here when relevant.
+  </Step>
+  <Step title="Context">
+    The situation and constraints that motivated the decision. Two to four paragraphs — no more.
+  </Step>
+  <Step title="Decision">
+    The concrete choice, stated as an imperative. This is the sentence that appears in the page's meta `description` field.
+  </Step>
+  <Step title="Consequences">
+    What the decision **enables**, **obligates**, or **forecloses**. The second-order effects the author was trading off.
+  </Step>
+  <Step title="Related">
+    Links back to the Reference, Platform, and other Decision pages the ADR touches. Where a spec is split across multiple Mintlify pages, every target is listed.
+  </Step>
+</Steps>
+
+## When to write a new ADR
+
+Write one when:
+
+- A choice locks in infrastructure (runtime, framework, persistence model).
+- The decision will be hard to reverse without cascading rewrites.
+- Two or more reasonable positions exist and the choice needs explanation.
+- A future maintainer would ask "why did we do it this way?" and the answer isn't obvious from the code or spec.
+
+Do **not** write one for implementation details already clear from the spec, style or lint choices, or scope-cutting decisions (those go in the [Roadmap](/concepts/roadmap)).
+
+Keep each ADR to ~200 words. If it needs more, it probably contains more than one decision — split it.
+
+## Numbering
+
+ADRs are numbered monotonically. Never renumber, never delete — **supersede** instead. The current log runs from ADR-001 through ADR-053.

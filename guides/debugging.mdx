@@ -1,0 +1,109 @@
+---
+title: "Debugging"
+description: "Debug panel, frame-budget counters, and performance monitoring."
+icon: "bug"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware), [ADR-008 Line IDs are author-written; CLI extracts .strings.csv](/decisions/008-line-ids-authored)
+</Info>
+
+## Debugging Affordances
+
+### Console Integration
+
+In development, Alumic provides a global debug object:
+
+```typescript
+// Available in browser console when import.meta.env.DEV.
+// Exposed only in the main realm (first-party plugins + dev builds); NOT
+// visible to Worker-sandboxed third-party plugins per [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing). The plugin
+// sandbox bridge deliberately omits `window.__alumic` from its proxy.
+window.__alumic = {
+  app,           // The App instance
+  ctx,           // AppContext
+  bus,           // EventBus
+  scheduler,     // Scheduler
+  tags,          // TagRegistry
+
+  // Helpers
+  emit(tag, data) { bus.emit(tag, data); },
+  get(subsystem) { return ctx.get(subsystem); },
+  tick(dt = 1/60) { app.tick(dt); },
+  pause() { /* pause tick loop */ },
+  resume() { /* resume tick loop */ },
+};
+```
+
+### Source Maps
+
+All builds include source maps. Errors in the browser console link back to TypeScript source, not compiled JavaScript.
+
+### Error Messages
+
+Alumic errors include actionable context:
+
+```
+PluginError: Plugin "Combat" depends on "Health", but "Health" is not registered.
+  → Did you forget to add it to the plugins list?
+  → Registered plugins: Core, RenderThree, Input
+
+SubsystemError: Cannot get PhysicsSubsystem — no active Scene scope.
+  → Current scopes: App (active), Session (active), Scene (none)
+  → Did you forget to call app.pushScene()?
+
+TagError: Tag "Ability.Fyre" is not registered.
+  → Similar registered tags: Ability.Fire, Ability.Fire.Ranged
+  → Did you mean "Ability.Fire"?
+```
+
+
+## Export / Offline Folder Conventions
+
+Under SaaS, authored content and assets live in the backend. `alumic export` ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)) writes a round-trip-able directory for on-prem seeding, git workflows, and offline authoring:
+
+```
+data/
+├── entities/            # per-entity JSON exports ([Entity Graph](/reference/entity-graph))
+│   ├── characters/
+│   ├── locations/
+│   ├── dialogues/
+│   ├── quests/
+│   ├── scenes/
+│   ├── items/
+│   └── abilities/
+├── strings/             # .strings.csv localization tables ([ADR-008 Line IDs are author-written; CLI extracts .strings.csv](/decisions/008-line-ids-authored))
+└── assets/
+    ├── manifest.json    # id → sha256/kind/contentType
+    └── blobs/<sha-prefix>/<sha>
+
+public/                  # template-author dev-server static bundle only
+└── index.html
+```
+
+Template authors working inside the monorepo may also keep seed data under `data/entities/` during development — this is the same path `alumic export` writes.
+
+
+## Performance Monitoring
+
+### Frame Budget
+
+At 60 FPS, each frame has a 16.67ms budget. The scheduler's profiling tracks how much each system consumes:
+
+```
+Frame Budget: 16.67ms
+├── PreUpdate:    2.1ms
+│   ├── InputPoll:     0.3ms
+│   └── RenderBegin:   1.8ms
+├── Update:       8.4ms
+│   ├── Physics:       3.2ms
+│   ├── AI:            2.1ms
+│   ├── Combat:        1.5ms
+│   └── Animation:     1.6ms
+├── PostUpdate:   4.2ms
+│   ├── RenderPresent: 3.8ms
+│   └── DebugUpdate:   0.4ms
+└── Remaining:    1.97ms (88.2% budget used)
+```
+
+This data is displayed in the debug panel and can be logged to the console for profiling.

@@ -1,0 +1,47 @@
+---
+title: "ADR-016: Constant entity type replaces NumRef"
+description: "There is no `NumRef` type."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The research proposed `NumRef = number | { __ref: string }` — a tunable-scalar type used anywhere a designer might want to centralize a number (damage multipliers, base costs, global coefficients). Resolution happens at cast-time against a shared constants table.
+
+Under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)) with the entity graph as the central data model, `NumRef` would be a parallel indirection mechanism alongside `EntityRef`. Everything else in the spec is "references are first-class entity links" ([ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api)). Introducing a second ref type for scalars fragments the model.
+
+## Decision
+
+There is no `NumRef` type. Designers who want shared/tunable numbers use a new built-in entity type:
+
+```ts
+export const ConstantType = defineEntityType({
+  name: 'Constant',
+  icon: 'hash',
+  editor: 'spec-sheet',
+  schema: z.object({
+    displayName: z.string(),
+    value: z.number(),
+    unit: z.string().optional(),  // 'seconds', 'damage', etc.
+    category: z.string().optional(),
+  }),
+});
+```
+
+Effect/ability/item definitions that want to reference a constant use a regular `EntityRef` (e.g., `role: 'damageFrom'`, `targetType: 'Constant'`). Runtime resolves the ref at cast-time by reading the target Constant's `value`.
+
+## Consequences
+
+**Enables:** Constants get inspector panels, backlinks ("where is this multiplier used?"), entity-graph search, and uniform serialization. Live rebalancing is a single API PATCH — all references see the new value on next read. On-prem/file export handles them with no special case.
+
+**Obligates:** Cast-time code must handle `EntityRef`-valued numeric fields (resolve before computing). A thin helper (`resolveNumber(value: number | EntityRef): number`) keeps call sites clean.
+
+**Forecloses:** The lighter `{ __ref: string }` shape. Uniformity wins: one indirection mechanism, not two.
+
+## Related
+
+- Specs: [Ability System](/reference/ability-system), [Authoring Abilities](/guides/abilities), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database)
+- Findings resolved: audit-2 #18.
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api).

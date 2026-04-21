@@ -1,97 +1,81 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Alumic"
+description: "Browser-first creative tools platform: game framework, canvas, UI designer, vector editor — one app."
+icon: "compass"
 ---
 
-## Setting up
+<Info>
+**Decisions shaping this page:** [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)
+</Info>
 
-Get your documentation site up and running in minutes.
+## What Alumic Is
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+Alumic is a **browser-first creative tools platform** built in TypeScript, delivered primarily as a hosted SaaS at alumic.app with on-prem deployment for studios that require it. At its core is a plugin-based game framework — a minimal kernel that composes reusable, data-driven game systems (dialogue, quests, inventories, abilities, skill trees) into playable game templates. But the game framework is one vertical within a broader set of creative tools:
 
-## Make it yours
+- **Game Framework** — A plugin kernel + composable game systems + genre templates
+- **Infinite Canvas** — A Figma-like spatial workspace for planning, organizing, and navigating projects. Game levels appear as interactive portal nodes on the canvas.
+- **UI/HUD Designer** — A visual-first WYSIWYG tool for designing game interfaces using a Yoga-based layout system, with a rich template ecosystem
+- **Vector Editor** — A standalone vector design tool (icons, sprites, UI assets) that also integrates with the game asset pipeline
+- **Graph Editors** — Visual node-and-edge editors for authoring dialogue trees, quest graphs, flow graphs, and skill trees
 
-Design a docs site that looks great and empowers your users.
+These modes coexist as top-level views in the application. Users switch between them depending on the task — spatial planning on the canvas, 3D scene editing in the game viewport, UI layout in the designer, icon creation in the vector editor.
 
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
-  </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
-  </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
+The core principle (shared across all modes):
 
-## Create beautiful pages
+> **Content and behavior are declared as inert, typed, lifecycle-scoped things; a minimal kernel resolves them at known phases.**
 
-Everything you need to create world-class documentation.
+This means game systems describe *what* they are (data schemas, event channels, subsystem state) via explicit `define*` factories, and the kernel handles *when* they initialize, tick, and tear down. The same principle extends to design tools: UI layouts, vector assets, and canvas documents are all authored as typed data and resolved by their respective runtimes.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
 
-## Need inspiration?
+## Roadmap at a Glance
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+Alumic ships in five phases. Details in [Roadmap](/concepts/roadmap); decisions in `adr/`.
+
+| Phase | Duration | Focus | Committed? |
+|-------|----------|-------|------------|
+| **Phase 1** | 6–8 weeks | Kernel + first template (moving cube). In-memory entity-db shim. | Yes |
+| **Phase 2** | 8–10 weeks | Fastify + Postgres backend, auth (JWT), assets, state, save, ECS interface. | Yes |
+| **Phase 3** | 6–8 weeks | Flow + ability + dialogue + multiplayer + teams + basic canvas renderer + engine plugin MVP (Unity + Godot). | Yes |
+| **Phase 4** | Ongoing | Editor shell, UI designer, vector editor, full canvas, marketplace, SSO. | Conditional on adoption |
+| **Phase 5** | As needed | bitECS, WebGPU, Rust/WASM, real-time collab, server-authoritative multiplayer. | Conditional on demand |
+
+Phase numbers referenced elsewhere in this spec map to this table.
+
+
+## Tech Stack
+
+| Layer | Technology | Rationale |
+|-------|-----------|-----------|
+| Runtime / Bundler | **Bun** | Speed, native TypeScript, built-in workspace support, test runner |
+| UI Framework | **SolidJS** | Fine-grained reactivity without virtual DOM overhead; ideal for game UI that updates frequently |
+| 3D Rendering | **Three.js** (WebGL) | Mature, well-documented, largest ecosystem of Three.js extensions |
+| Future Rendering | **WebGPU** via Three.js | Three.js is adding WebGPU support; Alumic's RenderKernel abstraction will support both |
+| Future Backend | **Fastify + Postgres** | Fast HTTP framework, robust relational storage for game data services |
+| Performance Layer | **Rust → WASM** | Portable, zero-cost abstraction performance for compute-heavy paths (pathfinding, physics, asset processing) |
+| Validation | **Zod** | Runtime schema validation with TypeScript type inference |
+| Testing | **Vitest** (via Bun) | ESM-native, fast, compatible with Bun |
+
+
+## Target Audience
+
+1. **Game Developers** — End users who scaffold a game from a template (`alumic create my-game --template topdown-action`) and customize it. They use the creative tools (canvas, UI designer, graph editors) alongside code to build their game.
+
+2. **Template Authors** — Developers who compose Alumic plugins into genre-specific templates (top-down action, tactics, narrative, survival). They write `defineTemplate()` manifests, author content as JSON, and implement game-specific logic in TypeScript.
+
+3. **Plugin Authors** — Framework developers who build reusable game systems (`@alumic/dialogue`, `@alumic/ability`, etc.) or creative tool extensions. They implement `AlumicPlugin` with subsystems, event channels, and scheduled systems.
+
+4. **UI/Visual Designers** — Creators who use the WYSIWYG UI designer and vector editor to produce game interfaces and visual assets without writing code. They work within the visual tools and export to formats consumed by the game runtime.
+
+
+## Value Proposition
+
+Alumic is valuable because:
+
+1. **Integrated creative workflow.** Design a HUD in the UI designer, author dialogue in the graph editor, plan levels on the canvas, test in the game viewport — all in one application. No context-switching between disconnected tools.
+2. **Fast iteration across the seam.** Edits in alumic.app propagate to every connected client — other browser tabs, the engine plugin ([Engine Plugin](/platform/engine-plugin)), CI observers — within seconds via the sync event stream ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)). No compile-wait-deploy cycle; no local file-watching required.
+3. **Reusable systems on arrival.** A dialogue system built for one template works in any other template — and can be exported to Unity/Unreal.
+4. **Composable game design.** Swap plugins in a template manifest to radically change game genre without rewriting systems.
+5. **Visual-first where it matters.** UI layouts, dialogue trees, and icons are authored visually. Code is for game logic, not for arranging rectangles.
+6. **Type-safe content authoring.** Zod schemas catch malformed content at author-time, not at runtime crash-time.
+7. **Small surface area.** The kernel fits in a developer's head. Understanding five primitives (plugins, subsystems, events, tags, scheduler) is enough to build anything.
+8. **PM and automation co-located with content.** Issues, boards, sprints, and milestones are entities ([Project Management](/reference/project-management)). A bug ticket references the Dialogue it's about; backlinks work without integration code. Agents are first-class authors ([Actors and Agents](/reference/actors-and-agents)); LLM work is governable from day one — agent writes become proposals, humans approve ([ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)). Agent-heavy teams don't glue Alumic to a separate PM tool.

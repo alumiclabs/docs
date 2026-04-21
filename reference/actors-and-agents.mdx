@@ -1,0 +1,324 @@
+---
+title: "Actors and Agents"
+description: "Users and agents as peer authoring identities; AgentRun scoping."
+icon: "robot"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals), [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag), [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)
+</Info>
+
+## Overview
+
+Alumic treats non-human authors as first-class peers of human users ([ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model)). This chapter documents the Actor model's concrete surfaces: how an Agent is registered, credentialed, rate-limited, and attributed; how an AgentRun scopes a set of writes for audit and revert; and — in Phase 4 — how declarative automation rules run as system agents.
+
+For the identity decision itself see [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model). For how proposals flow from agents to approvers see [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals).
+
+## The Actor Abstraction
+
+An **Actor** is any entity that can author writes. It resolves to one of:
+
+- `User` — a human (existing, spec/19).
+- `Agent` — a registered non-human author (new, below).
+
+The write path (spec/19 middleware, extended per [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model)) resolves every request to:
+
+```ts
+interface ResolvedActor {
+  actorId: string;                  // canonical ID regardless of user vs agent
+  actorKind: 'user' | 'agent';
+  agentRunId?: string;              // set when actorKind === 'agent' and a run is open
+  onBehalfOfUserId?: string;        // always set for agents; the human accountable
+  clientKind: 'browser' | 'plugin' | 'cli' | 'agent' | 'import';
+  workspaceId: string;
+  projectIds?: string[];
+  scopes: string[];
+}
+```
+
+This tuple is attached to every write; it ends up as `entity_versions.actor_id`, `agent_run_id`, `on_behalf_of_user_id`, `written_via`.
+
+## Agent Entity Type
+
+Agents are registered like any other entity. They are the **definition** of an authoring identity; an `AgentRun` is a single invocation.
+
+```typescript
+export const AgentSchema = z.object({
+  displayName: z.string().min(1).max(64),
+  kind: z.enum(['llm', 'rule', 'external', 'system']),
+  description: z.string().optional(),
+
+  // Who this agent acts on behalf of. Revoking this user's workspace membership
+  // disables the agent.
+  ownerUserId: z.string(),
+
+  // LLM-specific config (kind === 'llm')
+  model: z.string().optional(),              // e.g. 'claude-opus-4-7', 'gpt-5', 'local/llama-3.1'
+  systemPromptRef: z.string().optional(),    // entity ref to a Lore or prompt doc
+
+  // Tool surface
+  toolAllowlist: z.array(z.string()).optional(),  // e.g. ['entities:read', 'entities:propose', 'assets:read']
+  entityTypeAllowlist: z.array(z.string()).optional(), // restricts writes to these types
+
+  // Safety
+  maxApprovalThreshold: z.number().optional(), // auto-downgrade to proposal above this confidence value
+  perRunWriteCap: z.number().int().optional(),
+  perMinuteRateLimit: z.number().int().optional(),
+  budgetUsdPerRun: z.number().optional(),      // paired with [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag) metering
+
+  // Trigger surface
+  triggerKind: z.enum(['manual', 'scheduled', 'event', 'webhook']).default('manual'),
+  scheduleExpr: z.string().optional(),         // cron
+  triggerEventTag: z.string().optional(),      // tag prefix for automation rules
+
+  tags: z.array(z.string()).optional(),
+  revokedAt: z.string().optional(),
+});
+
+export const AgentType = defineEntityType({
+  name: 'Agent',
+  icon: 'bot',
+  editor: 'spec-sheet',
+  schema: AgentSchema,
+});
+```
+
+### Agent credentials
+
+An `Agent` carries an opaque **agent credential** — a PAT-shaped token ([ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)) prefixed `alagnt_` instead of `alpat_`. The credential is shown once at creation and hashed at rest. Revoking an agent invalidates the credential; in-flight `AgentRun`s may finish but issue no further writes.
+
+Agent credential scopes extend [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth):
+
+- `project:read` — read entities (same as user PAT).
+- `project:propose` — submit proposals only ([ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)). Never directly commit.
+- `project:write` — direct commit. Usually denied; reserved for `kind: 'system'` agents or explicit owner grant.
+- `asset:read` / `asset:upload` — asset API ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)).
+- `issue:create` / `issue:comment` — PM entity creation (spec/27).
+
+Default scopes for new agents: `project:read`, `project:propose`, `issue:create`, `issue:comment`. Promoting to `project:write` requires owner confirmation.
+
+### Routes (extends spec/19)
+
+```
+POST   /api/workspaces/:wid/agents              — create Agent + mint credential
+GET    /api/workspaces/:wid/agents
+GET    /api/workspaces/:wid/agents/:id
+PATCH  /api/workspaces/:wid/agents/:id
+DELETE /api/workspaces/:wid/agents/:id          — revoke
+POST   /api/workspaces/:wid/agents/:id/rotate   — rotate credential
+
+POST   /api/projects/:pid/agent-runs            — open run (agent credential only)
+GET    /api/projects/:pid/agent-runs?agentId=   — list
+GET    /api/projects/:pid/agent-runs/:id        — detail + writes + proposals
+POST   /api/projects/:pid/agent-runs/:id/close  — mark ended
+POST   /api/projects/:pid/agent-runs/:id/revert — revert all writes in this run ([ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log) forward-revert)
+```
+
+## AgentRun Entity Type
+
+An AgentRun is the audit/revert unit. Every write made under an agent credential carries its `agent_run_id`.
+
+```typescript
+export const AgentRunSchema = z.object({
+  agentId: z.string(),                    // entity ref → Agent
+  triggeredBy: z.object({
+    kind: z.enum(['manual', 'scheduled', 'event', 'webhook']),
+    actorId: z.string().optional(),       // for 'manual': who invoked
+    eventTag: z.string().optional(),      // for 'event'
+    cronTick: z.string().optional(),      // for 'scheduled'
+  }),
+  startedAt: z.string(),
+  endedAt: z.string().optional(),
+  status: z.enum(['running', 'succeeded', 'failed', 'reverted', 'partially-reverted']),
+
+  // Rolling counters, updated by the backend as writes happen under this run
+  writeCount: z.number().int().default(0),
+  proposalCount: z.number().int().default(0),
+  acceptedProposalCount: z.number().int().default(0),
+  issueCount: z.number().int().default(0),
+  commentCount: z.number().int().default(0),
+
+  // [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag) metering — set at run close
+  costUsd: z.number().optional(),
+  tokensIn: z.number().optional(),
+  tokensOut: z.number().optional(),
+
+  // Optional summary written by the agent at close
+  summary: z.string().optional(),
+
+  // Errors captured during the run
+  errors: z.array(z.object({
+    at: z.string(),
+    message: z.string(),
+    context: z.string().optional(),
+  })).default([]),
+});
+
+export const AgentRunType = defineEntityType({
+  name: 'AgentRun',
+  icon: 'play-circle',
+  editor: 'spec-sheet',                   // read-only view with "Revert run" action
+  schema: AgentRunSchema,
+});
+```
+
+### Revert-a-run semantics
+
+"Revert run X" reverts every write attributed to that run, in **reverse chronological order**, via [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log) forward-revert: each revert is a new version whose `data` equals the pre-run version's `data`. The revert's own writes attribute to the user who clicked the button; they carry a new `write_id` and `via: 'run-revert'`. An AgentRun's status becomes `reverted` if all its writes revert cleanly, `partially-reverted` if some could not be (conflicting subsequent writes).
+
+Revert does **not** delete AgentRun rows, Issues the agent opened, or Comments it made — those remain for audit. A reverted run still shows in the entity browser, marked with a strike-through badge.
+
+### Run open/close
+
+Two modes:
+
+- **Implicit.** The first write under an agent credential opens a run; subsequent writes within 10 minutes attach to the same run; idle timeout closes the run.
+- **Explicit.** `POST /api/projects/:pid/agent-runs` opens a run and returns `{ runId }`. The agent sends `X-Alumic-Agent-Run-Id: <runId>` on writes. `POST .../agent-runs/:id/close` marks it ended.
+
+Explicit is the recommended path for LLM agents — it lets the agent record a `summary` and ensures the run closes cleanly even if a process dies.
+
+## Safety Primitives
+
+### Per-run write cap
+
+If an agent's `perRunWriteCap` is set, the backend rejects writes beyond that count with `429 Too Many Requests` and `{ reason: 'run-write-cap', cap, written }`. Prevents runaway loops.
+
+### Per-minute rate limit
+
+Agents are rate-limited per minute regardless of run. [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag) metering middleware enforces. Default 60/min for LLM agents, unlimited for system agents.
+
+### Auto-downgrade to proposal
+
+An agent with `project:write` scope may still be forced onto the proposal path by entity-type or project approval policy ([ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)). This is the expected case: direct write is the exception, proposal is the default.
+
+### Budget caps
+
+`budgetUsdPerRun` pairs with [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag). When an AgentRun's accumulated `costUsd` exceeds the cap, the backend returns `402 Payment Required` with `{ reason: 'run-budget', cap, current }`. The run's status becomes `failed` unless explicitly closed.
+
+### Revocation
+
+Revoking an agent (`DELETE /api/workspaces/:wid/agents/:id`):
+
+1. Sets `revokedAt`.
+2. Invalidates the credential.
+3. Closes any open AgentRun with status `failed` and reason `agent-revoked`.
+4. Sets all of that agent's open proposals to state `withdrawn`.
+
+## Events (extends spec/27 `PM.*` naming convention)
+
+```typescript
+export const AgentRegistered   = defineChannel<{ agentId: string; ownerUserId: string }>('Agent.Registered');
+export const AgentRevoked      = defineChannel<{ agentId: string; byActorId: string }>('Agent.Revoked');
+
+export const AgentRunStarted   = defineChannel<{ runId: string; agentId: string; triggeredBy: string }>('Agent.Run.Started');
+export const AgentRunClosed    = defineChannel<{ runId: string; status: string; summary?: string }>('Agent.Run.Closed');
+export const AgentRunReverted  = defineChannel<{ runId: string; byActorId: string; revertedCount: number }>('Agent.Run.Reverted');
+```
+
+## Automation (Phase 4)
+
+Automation rules are declarative triggers that fire on entity events and take actions. Rules execute as a system-kind `Agent`, so every automation write is audit-tagged and revertible.
+
+### AutomationRule entity type
+
+```typescript
+export const AutomationRuleSchema = z.object({
+  displayName: z.string(),
+  description: z.string().optional(),
+  enabled: z.boolean().default(true),
+
+  trigger: z.object({
+    kind: z.enum(['entity-event', 'cron', 'webhook']),
+    eventTag: z.string().optional(),      // for 'entity-event', e.g. 'Entity.Updated' or 'PM.Sprint.Completed'
+    cron: z.string().optional(),
+    webhookPath: z.string().optional(),
+  }),
+
+  conditions: z.array(z.object({
+    op: z.enum(['eq', 'neq', 'gte', 'lte', 'matches', 'has-tag', 'has-ref', 'is-kind']),
+    field: z.string(),                    // dotted path into the event payload or entity
+    value: z.unknown(),
+  })).default([]),
+
+  actions: z.array(z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('open-issue'), template: z.object({
+      title: z.string(), body: z.string(), issueKind: z.string(), priority: z.string().optional(),
+      entityRefs: z.array(z.object({ role: z.string(), fromField: z.string() })).default([]),
+    })}),
+    z.object({ kind: z.literal('require-review'), targetField: z.string(), reviewers: z.array(z.string()) }),
+    z.object({ kind: z.literal('transition-issue'), issueIdField: z.string(), toColumn: z.string() }),
+    z.object({ kind: z.literal('add-label'), issueIdField: z.string(), label: z.string() }),
+    z.object({ kind: z.literal('propose-write'), entityIdField: z.string(), patchTemplate: z.unknown() }),
+    z.object({ kind: z.literal('emit-event'), tag: z.string(), payloadTemplate: z.unknown() }),
+  ])),
+
+  // System agent that runs this rule (auto-provisioned per workspace)
+  systemAgentId: z.string(),
+
+  maxFiresPerHour: z.number().int().optional(),  // circuit breaker
+  errorCountCap: z.number().int().default(10),   // auto-disable after N consecutive errors
+});
+
+export const AutomationRuleType = defineEntityType({
+  name: 'AutomationRule',
+  icon: 'zap',
+  editor: 'spec-sheet',
+  schema: AutomationRuleSchema,
+});
+```
+
+### Example rules
+
+```
+• On Entity.Updated where entity.type == 'Dialogue' and missingLineIds is not empty:
+    → open-issue { title: "Missing lineIds in ${entity.name}", kind: "bug", entityRefs: [{role: "affects", fromField: "entity.id"}] }
+
+• On PM.Sprint.Completed:
+    → transition-issue for all issues in sprint with status != 'done' → column 'backlog'
+
+• On Entity.Proposal.Submitted where targetEntity has tag 'critical':
+    → require-review { targetField: "proposalId", reviewers: [ownerActorId] }
+```
+
+### Rule execution
+
+1. Rule fires on its trigger.
+2. Backend opens an AgentRun against the rule's `systemAgentId`.
+3. Conditions evaluate against the event payload + referenced entities. If any fails, the run closes without action.
+4. Actions execute in order. Any action failure records an error on the run and aborts remaining actions.
+5. Run closes with status.
+
+### Safety
+
+- `maxFiresPerHour` limits trigger frequency.
+- `errorCountCap` auto-disables the rule after consecutive failures, with an Issue auto-opened explaining the disable.
+- Rules never bypass approval policies ([ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals)). A `propose-write` action always creates a proposal.
+
+## Migrations and Backfill
+
+Phase 2 entity_versions rows lack `actor_id`. On Phase 3 migration:
+
+```sql
+ALTER TABLE entity_versions ADD COLUMN actor_id UUID;
+ALTER TABLE entity_versions ADD COLUMN agent_run_id UUID;
+ALTER TABLE entity_versions ADD COLUMN on_behalf_of_user_id UUID;
+
+-- Backfill: existing rows get actor_id := written_by (all pre-Phase-3 writes were human).
+UPDATE entity_versions SET actor_id = written_by WHERE actor_id IS NULL;
+
+ALTER TABLE entity_versions ALTER COLUMN actor_id SET NOT NULL;
+
+-- Extend enum
+ALTER TABLE entity_versions
+  DROP CONSTRAINT IF EXISTS entity_versions_written_via_check,
+  ADD  CONSTRAINT entity_versions_written_via_check
+       CHECK (written_via IN ('browser', 'plugin', 'cli', 'agent', 'import'));
+```
+
+`written_by` is retained; new code reads `actor_id`.
+
+## Not in This Chapter
+
+- PM entity types (Issue, Board, Sprint, Milestone, Comment): [Project Management](/reference/project-management).
+- Proposed-write pipeline shape: `adr/042-proposed-writes-approvals.md`.
+- Schema API surfaces: [Entity API](/reference/entity-api).

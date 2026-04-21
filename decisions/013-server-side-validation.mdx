@@ -1,0 +1,43 @@
+---
+title: "ADR-013: Ref resolution and Zod validation happen server-side on write"
+description: "Validation is **server-side on write**."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The original spec (pre-SaaS pivot) assumed client-side Zod validation on load: files on disk → `JSON.parse` → `GraphSchema.parse()` → frozen object. The audit flagged a missing "publish/content compile step" — no mechanism to strip `.layout.json` or pre-resolve entity refs for shipped builds.
+
+Under SaaS-first ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)), the model changes. Entities live in Postgres. Clients fetch via HTTP API. There is no client-side file-parsing path in the primary flow.
+
+Client-side validation on every fetch would waste CPU (the data came from a server that already validates) and allow clients to disagree about validity. Server-side validation on write centralizes the rules and guarantees stored entities are always well-formed.
+
+## Decision
+
+Validation is **server-side on write**. When a client (editor, CLI, import tool) sends an entity write:
+
+1. Backend parses the payload against the entity type's Zod schema.
+2. Backend runs reference extractors, builds the outbound refs list.
+3. Backend persists the validated entity + its extracted refs.
+4. Backend updates the reverse-index for backlinks.
+
+Reads return pre-validated data. Clients skip the Zod parse in the hot path. In development builds, the editor may optionally re-validate to catch backend version skew; production does not.
+
+File import (on-prem seeding, template scaffolding) runs the same validation pipeline server-side on ingest. CLI export emits post-validated JSON so round-trip is safe.
+
+## Consequences
+
+**Enables:** Single source of truth for validation rules. No client-side compile step. No "what if two clients have different Zod versions" risk. Server can reject malformed writes with clear, actionable error messages.
+
+**Obligates:** The backend must carry every entity type's Zod schema. Plugin-defined entity types ([ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api)) must register their schemas with the backend. This implies either (a) backend loads all published plugins at boot, or (b) plugins declare schemas via a static artifact the marketplace ([ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4)) indexes.
+
+**Forecloses:** The research's "publish compiler emits stripped runtime bundle" story. Stripping happens implicitly via API contract ([ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field)); pre-resolution happens at write-time.
+
+## Related
+
+- Specs: [Data Formats](/reference/data-formats), [CLI](/guides/cli), [Validation](/guides/validation), [Testing](/guides/testing), [Debugging](/guides/debugging), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database)
+- Findings resolved: audit-2 #13, audit-1 B4 (partial).
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim).
+- Informs: [ADR-014 Layout/editor metadata is a separate entity field; runtime API omits it](/decisions/014-layout-separate-field), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4).

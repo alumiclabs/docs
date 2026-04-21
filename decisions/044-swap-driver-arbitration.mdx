@@ -1,0 +1,39 @@
+---
+title: "ADR-044: Single-driver arbitration for plugin swap()"
+description: "At any moment, **exactly one driver owns `AlumicPlugin.swap()`**:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Two independent systems can trigger `AlumicPlugin.swap()` (see [Plugin System](/reference/plugin-system) §Hot Module Replacement): Vite HMR during `alumic dev` (local template-author iteration) and the [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol) sync event stream (marketplace version bumps surfacing as `schema.changed`). Both resolve to the same lifecycle — dispose the old plugin's `Disposable`, load the new bundle, call `build(ctx)`, then `swap(ctx, old)`.
+
+If both drivers can fire concurrently, a `schema.changed` arriving mid-Vite-swap can either (a) interleave into a partially-loaded plugin state and corrupt the swap, or (b) race on the plugin registry entry and produce a "swap after swap" where the second handler sees stale `old`. Neither failure mode has a good recovery shape — the `swap(ctx, old)` contract assumes `old` is the fully-initialized previous plugin, not a half-built one.
+
+The spec in [CLI](/guides/cli) §Hot Reload Behavior says the Vite HMR and the sync event stream "are independent. Vite HMR is for *code*; the event stream is for *content*." That is correct at the data layer but doesn't address the plugin-swap overlap, because plugin swaps happen on *both* paths (local TS edits land via Vite; marketplace plugin upgrades land via the sync stream) and both mutate the same plugin registry.
+
+## Decision
+
+At any moment, **exactly one driver owns `AlumicPlugin.swap()`**:
+
+- **During `alumic dev` (local template-author mode):** the Vite HMR adapter is the sole driver. The sync-stream handler for `schema.changed` continues to fire (so UI can surface "new version available" affordances and the entity cache can invalidate), but it does **not** invoke `swap()`. Instead it records the pending bundle URL + version in a `pendingSwaps` queue on the App.
+- **At the end of each Vite swap cycle, the Vite adapter drains the `pendingSwaps` queue** in order, applying each as a normal `swap()` sequence. This preserves the "one swap at a time" invariant without losing marketplace upgrades that land during a local edit.
+- **Outside `alumic dev`** (production hosted editor, on-prem editor, engine plugin, CLI): the sync-stream handler is the sole `swap()` driver. Vite HMR is not present in those environments.
+
+Mode is selected at App boot via `import.meta.env.DEV && hasViteHmrApi()`. The kernel exposes `app.ctx.swapDriver` as `'vite' | 'sync-stream'` for observability and for plugins that want to gate swap-side effects by driver.
+
+## Consequences
+
+**Enables:** A single, well-defined execution path through `AlumicPlugin.swap()` regardless of which surface triggered the change. Plugin authors write one `swap(ctx, old)` without per-driver branching.
+
+**Obligates:** The sync-stream handler must expose a `pendingSwaps` queue that the Vite adapter can drain. The App kernel tracks current driver mode and surfaces it on `ctx`. Drain order is insertion; no coalescing — each marketplace upgrade is applied as a distinct swap so version history is preserved on the client.
+
+**Forecloses:** Concurrent swap drivers. A design that wanted "Vite edits always win over marketplace" or vice versa must be expressed through the single-driver arbitration, not through driver-level concurrency.
+
+## Related
+
+- Specs: [Plugin System](/reference/plugin-system), [Writing a Plugin](/guides/writing-a-plugin), [CLI](/guides/cli), [Validation](/guides/validation), [Testing](/guides/testing), [Debugging](/guides/debugging)
+- Depends on: [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol) (sync event stream), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4) (marketplace), [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing) (signed bundles).
+- Informs: plugin-author guidance; no downstream ADRs yet.

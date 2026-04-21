@@ -1,0 +1,140 @@
+---
+title: "ADR-042: Proposed writes and approval gates"
+description: "Proposed writes and approval gates"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab) commits Phase 1-4 to single-writer optimistic concurrency. That's fine when every author is a trusted editor — but Alumic's actor model ([ADR-037 Plugin-defined schemas, extractors, and migrations ship as publish artifacts](/decisions/037-plugin-schema-registration)) makes agents peers of users, and any serious agentic workflow requires a human-in-the-loop gate: the agent proposes a change, a human approves it, then it commits.
+
+Two layers of approval are needed:
+
+1. **Proposed writes on any entity** — an `actor` submits a patch that is held in a staging area until an approver accepts. Primary use case: agent edits to critical content.
+2. **Issue-level approvals** — a work item (spec/27) carries its own approval state machine (`needs-review`, `changes-requested`, `approved`). Primary use case: proposal reviews, decision records.
+
+Both layers share the same primitive; layer 2 is a special case that uses layer 1.
+
+## Decision
+
+### Proposed-write pipeline
+
+A write endpoint accepts an `X-Alumic-Mode: proposal` header (or `?mode=proposal` query). When set, the write does **not** land in `entities` / `entity_versions`; it lands in a new `entity_proposals` table:
+
+```
+CREATE TABLE entity_proposals (
+  id                   UUID PRIMARY KEY,
+  project_id           UUID NOT NULL,
+  entity_id            TEXT NOT NULL,
+  target_version       INT NOT NULL,     -- version the proposer saw
+  patch                JSONB NOT NULL,   -- the pending patch
+  proposer_actor_id    UUID NOT NULL,
+  agent_run_id         UUID,
+  summary              TEXT,             -- human-readable description
+  state                TEXT NOT NULL,    -- 'open' | 'approved' | 'changes-requested' | 'rejected' | 'superseded'
+  required_approvals   INT NOT NULL,
+  created_at           TIMESTAMPTZ DEFAULT now(),
+  resolved_at          TIMESTAMPTZ
+);
+
+CREATE TABLE proposal_reviews (
+  proposal_id  UUID REFERENCES entity_proposals(id),
+  reviewer_actor_id UUID NOT NULL,
+  decision     TEXT NOT NULL,            -- 'approve' | 'request-changes' | 'reject'
+  comment      TEXT,
+  created_at   TIMESTAMPTZ DEFAULT now(),
+  PRIMARY KEY (proposal_id, reviewer_actor_id)
+);
+```
+
+Routes (spec/19 extension):
+
+```
+POST   /api/projects/:pid/entities/:id/proposals          — submit proposal
+GET    /api/projects/:pid/proposals?state=open            — list open proposals
+GET    /api/projects/:pid/proposals/:id                   — detail + reviews
+POST   /api/projects/:pid/proposals/:id/review            — submit review decision
+POST   /api/projects/:pid/proposals/:id/commit            — accept + commit (auto after threshold)
+DELETE /api/projects/:pid/proposals/:id                   — withdraw
+```
+
+### Approval policy
+
+A **policy** declares who may approve and how many approvals are required. Policies resolve in order of specificity:
+
+1. **Per-entity policy** (`entities.approval_policy` JSONB) — narrowest.
+2. **Per-type policy** on the entity type registration (`defineEntityType({...approvalPolicy})`).
+3. **Per-project policy** (`projects.default_approval_policy`).
+4. **Per-workspace default** (`workspaces.default_approval_policy`).
+
+Policy shape:
+
+```ts
+type ApprovalPolicy =
+  | { kind: 'unrestricted' }  // anyone with write role commits directly
+  | { kind: 'any-editor' }    // one editor approval suffices
+  | { kind: 'n-of-m'; count: number; reviewers: 'any-editor' | 'owner' | { actorIds: string[] } }
+  | { kind: 'agent-writes-require-human', humanRole?: 'editor' | 'owner' };
+```
+
+**Default policy:** `agent-writes-require-human` with `humanRole: 'editor'`. Human writes commit directly; agent writes always land as proposals. This is the right default given the product thesis.
+
+### Accept path
+
+When `required_approvals` is met:
+
+1. Backend opens a transaction.
+2. Re-checks `target_version` against current head; if stale, state → `superseded`, transaction aborts.
+3. Applies `patch` via the standard entity PATCH path, setting `actor_id := proposer_actor_id`, `on_behalf_of_user_id := proposer's on_behalf_of_user_id`, `agent_run_id := proposal.agent_run_id`, and a new `via: 'proposal-accepted'` flag on the version row.
+4. `state := 'approved'`, `resolved_at := now()`.
+5. Emits `proposal.accepted` on the sync channel, followed by the normal `entity.updated`.
+
+### Conflict and error shapes
+
+Direct writes blocked by policy return `409 Conflict` with a new detail shape (extends [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)):
+
+```json
+{
+  "error": "conflict",
+  "code": "proposal-required",
+  "entityId": "old-hermit",
+  "policy": { "kind": "agent-writes-require-human", "humanRole": "editor" },
+  "suggestion": "POST /api/projects/.../entities/old-hermit/proposals"
+}
+```
+
+### Sync stream
+
+New event types (spec/19):
+
+```
+event: proposal.submitted    data: { proposalId, entityId, summary, proposerActorId, agentRunId? }
+event: proposal.reviewed     data: { proposalId, decision, reviewerActorId }
+event: proposal.accepted     data: { proposalId, entityId, newVersion }
+event: proposal.rejected     data: { proposalId, reason? }
+```
+
+### Issue-level approvals
+
+Issues (spec/27) with `kind: 'decision'` or `kind: 'review'` carry an independent approval state machine in their `data`: `{ state: 'open' | 'needs-review' | 'changes-requested' | 'approved' | 'rejected' }`. This is distinct from the proposed-write layer — Issue approvals govern *decisions*, proposed writes govern *content changes*. Proposed writes may auto-open an Issue for discussion; Issues may carry a pointer to a Proposal; neither requires the other.
+
+### Phasing
+
+- **Phase 3:** proposal submit/review/accept/reject endpoints, default `agent-writes-require-human` policy, sync events, basic review UI in the Inspector. No policy editor (admin sets policy via API or config).
+- **Phase 4:** policy editor UI, per-entity policies, bulk-approve flows, approval analytics.
+
+## Consequences
+
+**Enables:** Safe agentic authoring from day one of Phase 3. A human-in-the-loop gate without requiring CRDTs or multi-writer branching. Every approved proposal becomes a normal version in the history log — revert and audit work unchanged.
+
+**Obligates:** Every write path consults policy before committing. Agents coded against the direct PATCH endpoint will see `409 proposal-required` and must learn the proposal endpoint (or the client SDK auto-redirects). Engine plugin's read-only posture (spec/25) makes proposals moot there until Phase 4+.
+
+**Forecloses:** Silent agent writes. An agent with `entity:write` scope on a policy-gated entity cannot bypass the gate; the scope is necessary but not sufficient.
+
+## Related
+
+- Specs: [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [Permissions](/reference/permissions), [Project Management](/reference/project-management), [Actors and Agents](/reference/actors-and-agents)
+- Depends on: [ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log), [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model).
+- Informs: [ADR-043 Project-management entity types land Phase 3; automation Phase 4](/decisions/043-project-management-phase-3).

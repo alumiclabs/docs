@@ -1,0 +1,36 @@
+---
+title: "ADR-006: xstate v5 backs @alumic/state; @alumic/flow stays custom"
+description: "- **`@alumic/state`** wraps xstate v5."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+The research recommended xstate v5 as the HSM backbone for Alumic's state-machine package and proposed compiling quest/dialogue graphs to xstate configs at load time. The spec countered with custom packages: `@alumic/state` (HSM from scratch) and `@alumic/flow` (graph walker over `.graph.json`). The audit flagged the silent replacement.
+
+Two observations reshape the question:
+
+1. **HSMs are hard to get right.** Entry/exit ordering, guards, parallel regions, history states, serialization (`getPersistedSnapshot()`), compaction, and dev-tooling are all features xstate has polished over a decade. Matching that from scratch is a multi-month risk for little gain.
+2. **Dialogue/quest graphs are not statecharts.** They are authored node-and-edge data walked by an interpreter. Compiling them to xstate config would be a translation layer solving a problem we don't have, while losing the ability to present the authored graph faithfully in the editor.
+
+The "engine-portability" concern (transpiling game logic to C#/Rust/C++) is weaker than it appears: the *authored data* is the portable artifact. Any Unity/Unreal port re-implements the state-machine runtime anyway.
+
+## Decision
+
+- **`@alumic/state`** wraps xstate v5. `StateMachineInstance` is a thin facade over xstate's `Actor`. Serialization delegates to `actor.getPersistedSnapshot()` and `createActor(definition, { snapshot })`.
+- **`@alumic/flow`** remains a custom AST-walking interpreter over `.graph.json` data.
+
+## Consequences
+
+**Enables:** HSM correctness for free (guards, history, parallel regions, devtools via Stately). Serialization round-trips work from day one. Dialogue/quest graphs keep their authored shape and stay first-class in the editor.
+
+**Obligates:** xstate v5 becomes a runtime dependency (~14 KB gzipped). Documentation must state clearly which subsystem uses which runtime so authors don't confuse `@alumic/state` APIs with `@alumic/flow` APIs.
+
+**Forecloses:** The research's "compile quests to xstate" path. Complex quest stages with internal HSM needs can nest `@alumic/state` machines inside FlowGraph node handlers if needed.
+
+## Related
+
+- Specs: [State Machines](/reference/state-machines), [Authoring Flow and State](/guides/flow-and-state)
+- Findings resolved: audit-1 A2, B1; audit-2 #12 (partial), C4.

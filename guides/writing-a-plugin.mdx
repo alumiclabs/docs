@@ -1,0 +1,98 @@
+---
+title: "Writing a Plugin"
+description: "definePlugin(), subsystems, channels, lifecycle."
+icon: "plug"
+---
+
+## Plugin Composition Patterns
+
+### Feature Plugin
+
+The most common pattern. Provides a self-contained game system:
+
+```typescript
+export const dialoguePlugin = definePlugin({
+  meta: {
+    name: 'Dialogue',
+    version: '0.1.0',
+    dependencies: ['Core'],
+  },
+  build(ctx) {
+    // Register the dialogue subsystem
+    ctx.subsystem(DialogueSubsystem);
+
+    // Subscribe to relevant channels
+    DialogueRequested.on((e) => {
+      const dialogue = ctx.get(DialogueSubsystem);
+      dialogue.start(e.graphId, e.entryNodeId);
+    });
+
+    // No scheduled system — dialogue advances on events, not per-frame
+  },
+});
+```
+
+### Integration Plugin
+
+Bridges two systems that shouldn't directly depend on each other:
+
+```typescript
+// @alumic/dialogue-combat-integration
+export const dialogueCombatBridge = definePlugin({
+  meta: {
+    name: 'DialogueCombatBridge',
+    dependencies: ['Dialogue', 'Combat'],
+  },
+  build(ctx) {
+    // When combat ends, trigger a dialogue
+    CombatEnded.on((e) => {
+      if (e.victory) {
+        DialogueRequested.emit({
+          graphId: 'victory-dialogue',
+          entryNodeId: 'start',
+        });
+      }
+    });
+  },
+});
+```
+
+### Configuration Plugin
+
+Provides only configuration — no subsystems or systems:
+
+```typescript
+export function gameConfig(config: GameConfig): AlumicPlugin {
+  return definePlugin({
+    meta: { name: 'GameConfig' },
+    build(ctx) {
+      // Store config as an App-scope resource
+      ctx.insertResource(config);
+    },
+  });
+}
+```
+
+### Aggregate Plugin
+
+Bundles multiple related plugins for convenience:
+
+```typescript
+export function narrativeBundle(): AlumicPlugin[] {
+  return [
+    dialoguePlugin,
+    questPlugin,
+    journalPlugin,
+    dialogueQuestBridge,
+  ];
+}
+
+// Usage in template:
+const app = new App({
+  plugins: [
+    threeWebGL(),
+    ...narrativeBundle(),
+    combatPlugin,
+  ],
+});
+```

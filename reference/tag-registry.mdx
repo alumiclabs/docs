@@ -1,0 +1,304 @@
+---
+title: "Tag Registry"
+description: "Hierarchical dotted tags, matchers, redirectors."
+icon: "tags"
+---
+
+## Overview
+
+Tags are hierarchical, dot-separated identifiers used throughout Alumic for addressing, categorization, and matching. They are inspired by Unreal Engine's Gameplay Tags system but adapted for TypeScript.
+
+Tags serve as:
+- **Event channel addresses** — `defineChannel<T>('Combat.Damage.Dealt')`
+- **Ability activation gates** — `required: ['Status.Alive']`, `blocked: ['Status.Stunned']`
+- **Asset categorization** — `bundle: 'Level.Forest.Props'`
+- **System queries** — "find all subsystems tagged with `Audio.*`"
+
+The `@alumic/tags` package is intentionally standalone — zero Alumic dependencies — so it can be used by any package without circular dependency issues.
+
+## Tag Type
+
+```typescript
+/**
+ * A Tag is a branded string with hierarchical semantics.
+ * The brand prevents accidental use of plain strings where tags are expected.
+ */
+export type Tag = string & { readonly __tag: unique symbol };
+```
+
+Tags use dotted notation: `'Ability.Fire.Ranged'`. Each dot-separated segment is a level in the hierarchy:
+
+```
+Ability
+├── Ability.Fire
+│   ├── Ability.Fire.Ranged
+│   └── Ability.Fire.Melee
+├── Ability.Ice
+│   └── Ability.Ice.AoE
+└── Ability.Heal
+```
+
+## Core Functions
+
+### defineTag
+
+```typescript
+/**
+ * Define and intern a tag. Returns a branded Tag value.
+ * Calling defineTag with the same path returns the same Tag instance.
+ *
+ * @param path - Dot-separated hierarchical path
+ * @returns An interned Tag
+ *
+ * @example
+ * const Fire = defineTag('Ability.Fire');
+ * const FireRanged = defineTag('Ability.Fire.Ranged');
+ * const Fire2 = defineTag('Ability.Fire');
+ * Fire === Fire2; // true — interned
+ */
+export function defineTag(path: string): Tag;
+```
+
+**Interning:** Tags are interned — calling `defineTag` with the same path string returns the same `Tag` reference. This enables reference equality checks (`===`) and ensures consistent hashing.
+
+**Validation:** Tag paths must:
+- Contain only alphanumeric characters, dots, and hyphens
+- Not start or end with a dot
+- Not contain consecutive dots
+- Be non-empty
+
+Invalid paths throw:
+```
+TagError: Invalid tag path ".Ability.Fire" — must not start with a dot
+```
+
+### matchesTag
+
+```typescript
+/**
+ * Check if a candidate tag matches a pattern tag hierarchically.
+ *
+ * A match occurs when:
+ * - candidate equals pattern (exact match), OR
+ * - candidate is a descendant of pattern (prefix match)
+ *
+ * @example
+ * matchesTag('Ability.Fire', 'Ability.Fire');          // true — exact
+ * matchesTag('Ability.Fire', 'Ability.Fire.Ranged');   // true — descendant
+ * matchesTag('Ability.Fire', 'Ability.Ice');            // false — different branch
+ * matchesTag('Ability.Fire', 'Ability');                // false — pattern is more specific
+ * matchesTag('Ability', 'Ability.Fire.Ranged');         // true — Ability is ancestor
+ */
+export function matchesTag(
+  pattern: Tag | string,
+  candidate: Tag | string,
+): boolean;
+```
+
+**Semantics:** `matchesTag(pattern, candidate)` answers: "Does the candidate fall under the pattern?" Think of pattern as a category and candidate as a specific item. `matchesTag('Damage', 'Damage.Fire.Crit')` is true because fire crit damage IS damage.
+
+### parentTag
+
+```typescript
+/**
+ * Get the parent tag of a dotted path.
+ *
+ * @example
+ * parentTag('Ability.Fire.Ranged'); // → 'Ability.Fire'
+ * parentTag('Ability.Fire');         // → 'Ability'
+ * parentTag('Ability');              // → undefined (root tag)
+ */
+export function parentTag(tag: Tag | string): Tag | undefined;
+```
+
+### ancestors
+
+```typescript
+/**
+ * Get all ancestor tags, from immediate parent to root.
+ *
+ * @example
+ * ancestors('Ability.Fire.Ranged');
+ * // → ['Ability.Fire', 'Ability']
+ *
+ * ancestors('Ability');
+ * // → [] (root has no ancestors)
+ */
+export function ancestors(tag: Tag | string): Tag[];
+```
+
+### depth
+
+```typescript
+/**
+ * Get the depth of a tag (number of segments).
+ *
+ * @example
+ * depth('Ability');              // → 1
+ * depth('Ability.Fire');         // → 2
+ * depth('Ability.Fire.Ranged');  // → 3
+ */
+export function depth(tag: Tag | string): number;
+```
+
+## Tag Registry
+
+The `TagRegistry` manages all known tags and provides query/redirect capabilities.
+
+```typescript
+export interface TagRegistry {
+  /** Register a tag (idempotent). Also registers all ancestor tags. */
+  register(tag: Tag): void;
+
+  /** Check if a tag is registered. */
+  has(tag: Tag | string): boolean;
+
+  /**
+   * Resolve a tag through any redirectors.
+   * If no redirector exists, returns the tag unchanged.
+   */
+  resolve(tag: Tag | string): Tag;
+
+  /**
+   * Register a redirector: lookups for `from` will resolve to `to`.
+   * Useful for aliasing or migrating tag paths.
+   */
+  redirect(from: Tag | string, to: Tag | string): void;
+
+  /** Get all registered tags. */
+  all(): readonly Tag[];
+
+  /**
+   * Query all registered tags matching a prefix.
+   * Uses hierarchical matching (matchesTag).
+   *
+   * @example
+   * registry.query('Ability.Fire');
+   * // → ['Ability.Fire', 'Ability.Fire.Ranged', 'Ability.Fire.Melee']
+   */
+  query(prefix: Tag | string): Tag[];
+
+  /** Number of registered tags. */
+  readonly size: number;
+}
+
+/** Create a new TagRegistry. */
+export function createTagRegistry(): TagRegistry;
+```
+
+### Auto-Registration of Ancestors
+
+When a tag is registered, all its ancestors are automatically registered too:
+
+```typescript
+const registry = createTagRegistry();
+const fireRanged = defineTag('Ability.Fire.Ranged');
+registry.register(fireRanged);
+
+registry.has('Ability.Fire.Ranged'); // true
+registry.has('Ability.Fire');         // true — auto-registered
+registry.has('Ability');              // true — auto-registered
+```
+
+### Redirectors
+
+Redirectors alias one tag to another. This is useful for:
+- Renaming tags without breaking existing subscribers
+- Creating shorthand aliases
+- Mapping generic tags to game-specific tags
+
+```typescript
+const registry = createTagRegistry();
+const dmg = defineTag('Dmg');
+const combatDamage = defineTag('Combat.Damage.Dealt');
+
+registry.register(combatDamage);
+registry.redirect(dmg, combatDamage);
+
+registry.resolve(dmg); // → 'Combat.Damage.Dealt'
+```
+
+**Redirector chains:** Redirectors can chain (A → B → C), but the registry detects and rejects circular redirects:
+```
+TagError: Circular redirect detected: Dmg → Combat.Damage.Dealt → Dmg
+```
+
+## Integration With Event Bus
+
+The event bus uses the tag registry for hierarchical dispatch. When `defineChannel<T>(tag)` is called:
+
+1. The tag is interned via `defineTag(tag)`
+2. The tag and its ancestors are registered in the `TagRegistry`
+3. When `channel.emit(event)` is called, the bus delivers to:
+   - Handlers subscribed to the exact tag
+   - Handlers subscribed to each ancestor tag (bottom-up)
+
+```typescript
+// Subscribe at a broad level
+bus.on('Combat', (e) => logCombatEvent(e));    // catches ALL combat events
+
+// Subscribe at a specific level
+bus.on('Combat.Damage.Dealt', (e) => showDamageNumber(e));
+
+// Emit at the leaf
+bus.emit('Combat.Damage.Dealt', { amount: 25 });
+// → showDamageNumber({ amount: 25 })    — exact match
+// → logCombatEvent({ amount: 25 })       — ancestor match
+```
+
+## Integration With Ability System (Phase 3)
+
+The ability system uses tags for activation gating:
+
+```typescript
+defineAbility({
+  name: 'Fireball',
+  tags: {
+    ownedTags: ['Ability.Fire.Ranged'],
+    requiredTags: ['Status.Alive', 'Status.HasMana'],
+    blockedTags: ['Status.Silenced', 'Status.Stunned'],
+    cancelTags: ['Status.Interrupted'],
+  },
+  // ...
+});
+```
+
+Tag matching uses `matchesTag()`:
+- `requiredTags: ['Status.Alive']` — the entity must have `Status.Alive` or any descendant
+- `blockedTags: ['Status.Stunned']` — if the entity has `Status.Stunned` or any descendant, the ability cannot activate
+
+## Performance
+
+### Interning
+
+Tags are interned in a `Map<string, Tag>`. Lookup is O(1). Defining the same tag twice returns the same reference.
+
+### Matching
+
+`matchesTag(pattern, candidate)` is a string prefix check: `candidate.startsWith(pattern) && (candidate.length === pattern.length || candidate[pattern.length] === '.')`. This is O(n) where n is the pattern length — effectively constant for typical tag depths (2-4 segments).
+
+### Registry Queries
+
+`registry.query(prefix)` performs a linear scan of all registered tags. For Phase 1 with <500 tags, this is negligible. If tag count grows significantly, the registry can be backed by a trie without changing the public API.
+
+## Naming Conventions
+
+Tags should follow these conventions:
+
+| Category | Pattern | Examples |
+|----------|---------|---------|
+| Abilities | `Ability.{School}.{Name}` | `Ability.Fire.Fireball`, `Ability.Heal.Regenerate` |
+| Status effects | `Status.{Effect}` | `Status.Stunned`, `Status.Burning`, `Status.Alive` |
+| Combat events | `Combat.{Category}.{Action}` | `Combat.Damage.Dealt`, `Combat.Kill` |
+| Dialogue events | `Dialogue.{Action}` | `Dialogue.Started`, `Dialogue.ChoiceMade` |
+| Input actions | `Input.{Context}.{Action}` | `Input.Gameplay.MoveForward`, `Input.Menu.Select` |
+| Assets | `Asset.{Bundle}.{Type}` | `Asset.Level.Forest`, `Asset.UI.Icons` |
+| App lifecycle | `App.{Event}` | `App.Booted`, `App.Shutdown` |
+| Scene lifecycle | `Scene.{Event}` | `Scene.Entered`, `Scene.Exited` |
+
+### Rules
+
+- Use PascalCase for each segment: `Ability.Fire`, not `ability.fire`
+- Keep depth to 2-4 segments — deeper hierarchies are rarely useful
+- Use nouns for categories, past-tense verbs for events: `Combat.Damage.Dealt`, not `Combat.DealDamage`
+- Avoid abbreviations: `Status.Stunned`, not `Stat.Stun`

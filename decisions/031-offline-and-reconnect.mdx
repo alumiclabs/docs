@@ -1,0 +1,54 @@
+---
+title: "ADR-031: Offline and reconnect semantics per client"
+description: "Each client defines a single explicit offline policy:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim) guaranteed Phase 1 is offline-capable via the in-memory shim. Once the Phase 2 backend lands, offline behavior across the browser, engine plugin, and CLI becomes a design question. "Local mode" is not a separate deployment — it is a degraded state of the same clients ([ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first)).
+
+## Decision
+
+Each client defines a single explicit offline policy:
+
+### Browser editor
+
+- On network failure, the editor switches to **outbox mode**: writes are queued in IndexedDB with their `If-Match` version and a client-generated `writeId`.
+- A persistent banner indicates "Offline — 3 changes pending."
+- On reconnect, the outbox replays in order. Conflicts ([ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)) are surfaced per-entry with "Keep yours / Discard / Open side-by-side."
+- Writes older than 24 hours expire; the user is prompted to review before replay.
+- Reads during offline mode serve from the entity cache (populated by prior reads + the sync protocol from [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol) if WebSocket push is enabled).
+
+### Engine plugin
+
+The Phase-4 engine plugin is **read-only** — it mirrors project state into the engine editor and does not accept writes from engine-side code (spec 25 §Overview, §Phasing). Its offline behavior in Phase 4 is:
+
+- The plugin's cache ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)) is the source of truth while offline. Unity/Unreal/Godot continue operating against the cache.
+- Authoring actions that would require a write are refused client-side with "Offline — reconnect in alumic.app to make changes."
+- On reconnect, the plugin catches up via `/api/projects/:id/events?since=<cursor>`.
+
+When engine-side writes are introduced (Phase 5+ — baked scenes, engine-authored entity edits), they use the same `writeId` + `If-Match` discipline as the browser, queue to local disk, and replay on reconnect against the new head version. Conflicts are logged; the plugin does not prompt (it's often headless).
+
+### CLI
+
+- CLI is online-by-default. An `--offline` flag enables file-mode (writes to the local `data/entities/` export layout); `alumic push` syncs.
+
+### On-prem / "local mode"
+
+- On-prem is not offline — it is a self-hosted SaaS. Same clients, same protocols, different backend URL. If the on-prem backend itself is down, clients enter the same outbox state.
+
+## Consequences
+
+**Enables:** A predictable offline story without splitting the codebase. The outbox is a small, testable primitive shared between browser and plugin.
+
+**Obligates:** Every client persists the outbox to durable storage (IndexedDB for browser, disk for plugin and CLI). Write idempotency requires the backend to accept `X-Alumic-Write-Id` and de-duplicate on replay.
+
+**Forecloses:** A "just don't let users edit offline" stance. Offline editing is a feature, not a degraded state; conflicts are the price.
+
+## Related
+
+- Specs: [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints), [Engine Plugin](/platform/engine-plugin), [Navigation and Shell](/reference/navigation-shell), [Undo and History](/reference/undo-history)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-002 Phase 1 uses an in-memory entity-db shim; backend lands Phase 2](/decisions/002-phase-1-in-memory-shim), [ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape).

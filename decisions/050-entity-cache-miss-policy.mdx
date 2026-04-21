@@ -1,0 +1,38 @@
+---
+title: "ADR-050: EntityCache miss policy — placeholder + background fetch"
+description: "`EntityCache.get(id)` **never returns undefined for a known entity type**."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-009 Event bus is strictly synchronous](/decisions/009-synchronous-event-bus) commits the event bus to strict synchrony: subsystems must not `await` in tick-path code. Spec 23 routes hot-path entity reads through a session-scoped `EntityCache` that returns `Entity<T> | undefined`. What a subsystem does with `undefined` was left to the caller — a silent invitation for ad-hoc null-handling throughout the framework, or worse, a fallback async fetch that breaks [ADR-009 Event bus is strictly synchronous](/decisions/009-synchronous-event-bus).
+
+## Decision
+
+`EntityCache.get(id)` **never returns undefined for a known entity type**. On a cache miss the cache:
+
+1. Looks up the entity type descriptor by asking the type registry for the registered type associated with `id` (the server includes `{ id, type }` tuples in any page response the cache has seen; otherwise the cache falls back to the type returned by a background probe).
+2. Returns a **synthetic placeholder**: `{ id, type, name: id, data: EntityType.defaults, tags: [], refs: [], version: 0, createdAt, updatedAt }`.
+3. Emits `EntityCacheMiss { id, type }` on the event bus.
+4. Kicks off a background `fetch(id)` against the `EntityDatabase`. On success, swaps the entry and emits `EntityCacheFilled { id, type, version }`. On 404, swaps to a "deleted" marker entity with `data = defaults` and emits `EntityCacheFilled { id, type, version: 0, deleted: true }`.
+
+`EntityCache.get(id)` returns `undefined` only when the type of `id` cannot be determined at all — a structural error, not a normal miss.
+
+Clients that cannot tolerate placeholders (the engine plugin's mirror during a cold snapshot, the installer) use `await entityDb.get(id)` directly, not the cache.
+
+## Consequences
+
+**Enables:** Synchronous hot-path code stays synchronous. UI components bound via channel-driven signals (spec 18) re-render on `EntityCacheFilled`. Dialogue, ability, and flow runtimes never crash on an out-of-cache reference; they render defaults until the real entity arrives.
+
+**Obligates:** Every entity type must define sensible `defaults` (spec 23 `defineEntityType`). Consumers that display "loading" states subscribe to `EntityCacheMiss`/`EntityCacheFilled` rather than null-checking `data`. Placeholders are distinguishable by `version === 0`; code that writes back must not use placeholder versions as `If-Match`.
+
+**Forecloses:** Silent-undefined semantics for cache misses. Any `EntityCache.get()` call site that checks for `undefined` is a structural type-registry bug, not a miss.
+
+## Related
+
+- Specs: [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [UI Integration](/reference/ui-integration), [UI Designer](/reference/ui-designer), [Designing UI](/guides/ui-design)
+- Depends on: [ADR-009 Event bus is strictly synchronous](/decisions/009-synchronous-event-bus), [ADR-013 Ref resolution and Zod validation happen server-side on write](/decisions/013-server-side-validation).
+- Informs: spec 12 dialogue runtime, spec 13 ability runtime.

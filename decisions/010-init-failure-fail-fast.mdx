@@ -1,0 +1,41 @@
+---
+title: "ADR-010: Subsystem init() failure is fail-fast"
+description: "Init failure is **fail-fast**."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Spec chapter 4 ([App Lifecycle](/reference/app-lifecycle)) notes that `init()` is async — so a subsystem like `ThreeRenderKernel` can reject if WebGPU is unavailable, an audio context can't initialize, or a network service is unreachable. The spec never said what happens on rejection.
+
+Three policies were on the table:
+1. **Fail-fast:** reject `boot()`, tear down already-initialized subsystems in reverse order.
+2. **Continue:** log the error, skip the failed subsystem, keep booting. Subsequent `ctx.get()` on the failed subsystem throws.
+3. **Retry with backoff:** wrap `init()` in retry logic.
+
+(2) produces partial app states that are impossible to reason about. (3) hides real errors and delays the inevitable.
+
+## Decision
+
+Init failure is **fail-fast**. Any `init()` rejection during `App.boot()`:
+
+1. Emits on the `PluginError` channel (`App.Error.Plugin`) with the failing subsystem's name and the error.
+2. Tears down already-initialized subsystems in reverse registration order.
+3. Rejects the `App.boot()` promise with an `InitError` wrapping the original.
+
+The same policy applies to scope entry (`startSession`, `pushScene`, `addPlayer`): if a scope-scoped subsystem rejects, the scope transition is aborted and partially-initialized sibling subsystems are torn down.
+
+## Consequences
+
+**Enables:** Predictable error surface. A caller of `app.boot()` knows a rejected promise means nothing is running and it's safe to retry or fall back. Tests can assert failure modes cleanly.
+
+**Obligates:** Plugins must ensure their `deinit()` is safe to call on a partially-initialized subsystem (e.g., if `init()` threw halfway through). The conventional shape is to allocate resources inside `init()`'s body, return the state object last, and let `deinit()` handle a possibly-partial state defensively.
+
+**Forecloses:** The "partial boot" pattern where a rendering-unavailable browser can still run headless game logic. If headless fallback is needed, construct the App with `headless: true` explicitly.
+
+## Related
+
+- Specs: [App Lifecycle](/reference/app-lifecycle), [Subsystem Hierarchy](/reference/subsystem-hierarchy)
+- Findings resolved: audit-1 B6.

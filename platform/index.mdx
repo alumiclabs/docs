@@ -1,0 +1,46 @@
+---
+title: "Platform"
+description: "Deployment modes, identity, networking, engine plugin, marketplace."
+icon: "server"
+---
+
+Operator-facing documentation. If you're deploying Alumic, managing auth, integrating an engine plugin, or publishing to the marketplace, everything lives here.
+
+## Deployment and identity
+
+<CardGroup cols={3}>
+  <Card title="Deployment" icon="cloud" href="/platform/deployment">
+    Hosted SaaS, on-prem, and single-user desktop — one codebase.
+  </Card>
+  <Card title="Authentication" icon="key" href="/platform/authentication">
+    Browser JWTs, engine-plugin PATs, workspace scoping.
+  </Card>
+  <Card title="Database schema" icon="database" href="/platform/database-schema">
+    Postgres tables: users, workspaces, projects, entities, versions.
+  </Card>
+</CardGroup>
+
+## Runtime
+
+<CardGroup cols={3}>
+  <Card title="Middleware and write path" icon="shield" href="/platform/middleware">
+    Auth → workspace scope → rate limit → quota → meter → permission → handler.
+  </Card>
+  <Card title="Multiplayer" icon="users" href="/platform/multiplayer">
+    Colyseus-based room networking for players.
+  </Card>
+  <Card title="Design constraints" icon="gauge" href="/platform/design-constraints">
+    Rate limits, quotas, and the invariants the platform enforces.
+  </Card>
+</CardGroup>
+
+## Integrations
+
+<CardGroup cols={2}>
+  <Card title="Engine plugin" icon="gamepad-modern" href="/platform/engine-plugin">
+    Unity, Unreal, and Godot integrations that mirror a project locally.
+  </Card>
+  <Card title="Marketplace" icon="store" href="/platform/marketplace">
+    Template and plugin distribution; publish pipeline; install flow.
+  </Card>
+</CardGroup>

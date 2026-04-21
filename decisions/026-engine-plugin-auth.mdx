@@ -1,0 +1,59 @@
+---
+title: "ADR-026: Engine-plugin authentication via workspace-scoped PATs"
+description: "The engine plugin authenticates to Alumic via **Personal Access Tokens** issued from the user's account settings."
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing) commits SaaS authentication to email + password + JWT sessions intended for interactive browser clients. The engine plugin (Unity, Unreal, Godot integration) is a non-interactive long-running client: it needs credentials that survive restarts, can be rotated, and carry a scope narrower than a human session.
+
+Three options surveyed: (a) reuse the browser JWT — painful UX (paste a cookie into Unity) and too broad a scope; (b) OAuth device flow — good UX but infrastructure-heavy; (c) **Personal Access Tokens (PATs)** scoped to a workspace or project — simple, rotatable, composable with future device-flow.
+
+## Decision
+
+The engine plugin authenticates to Alumic via **Personal Access Tokens** issued from the user's account settings. A PAT carries:
+
+```ts
+export interface PAT {
+  id: string;                           // token ID (public, for revocation)
+  secret: string;                       // opaque bearer (hashed at rest)
+  workspaceId: string;                  // scope
+  projectIds?: string[];                // optional per-project narrowing
+  scopes: Array<'project:read' | 'project:write' | 'asset:read'>;
+  createdAt: string;
+  expiresAt?: string;                   // optional TTL
+  lastUsedAt?: string;
+  label: string;                        // human-readable, e.g. "Unity dev machine"
+}
+```
+
+The plugin sends `Authorization: Bearer <secret>`. The backend verifies the hash, checks scope against the requested operation, and inherits the issuing user's role on the workspace (PAT cannot exceed the user's current permissions — [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing)). Tokens are `alpat_`-prefixed for secret-scanner detection.
+
+OAuth device flow is a future addition for interactive installs (`alumic login` in the plugin's setup wizard); the underlying credential model stays the same — device flow mints a PAT-shaped token.
+
+### PAT lifecycle against user role changes
+
+PATs do not cache the issuing user's role. Per-request authorization evaluates the **current** role of the user on the workspace:
+
+- User role downgrade (editor → viewer): PAT's effective permissions shrink on the next request, no explicit revocation needed.
+- User removed from the workspace: all PATs they hold on that workspace return `401 { reason: "token_revoked" }` on the next request.
+- User account deleted: the same; PATs are soft-deleted via cascade.
+
+This matches the `effective = user_role ∩ pat_scope` projection in [Permissions](/reference/permissions) §PAT Scope Composition.
+
+## Consequences
+
+**Enables:** A rotatable, revocable, narrowly-scoped credential for the engine plugin. The same model serves CLI tools ([ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware)) and CI. Downgrade to read-only for build agents is one scope-drop.
+
+**Obligates:** The backend carries PAT management endpoints (`POST /api/auth/tokens`, `DELETE /api/auth/tokens/:id`, `GET /api/auth/tokens`). PAT secrets are shown once at issuance and hashed at rest. Rate-limiting keys on `(patId, route)` for abuse detection.
+
+**Forecloses:** Reusing human session JWTs for machine clients. JWT stays browser-only.
+
+## Related
+
+- Specs: [Engine Plugin](/platform/engine-plugin), [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid).
+- Informs: [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol), [ADR-035 CLI is SaaS-aware by default](/decisions/035-cli-saas-aware), [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag), [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model) (agent credentials are a PAT variant prefixed `alagnt_` with scope extensions `project:propose`, `issue:create`, `issue:comment` — see spec/28).

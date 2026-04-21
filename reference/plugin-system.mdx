@@ -1,0 +1,339 @@
+---
+title: "Plugin System"
+description: "AlumicPlugin interface, plugin registry, dependency sort."
+icon: "puzzle-piece"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-007 Plugin identity lives in code via definePlugin()](/decisions/007-plugin-identity-in-code), [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)
+</Info>
+
+## Overview
+
+Every feature in Alumic is a plugin. The plugin system is the primary extension mechanism — the kernel provides composition machinery, and plugins provide all actual functionality (rendering, input, dialogue, combat, etc.).
+
+Plugins are defined via `definePlugin()`, registered with an `App`, and built during `App.boot()` in topologically sorted dependency order.
+
+> **Plugin identity lives in code.** Alumic does not use a separate `alumic.json` manifest or an `alumic` subkey in `package.json`. A plugin's metadata (`name`, `version`, `dependencies`, `unique`) lives on the plugin object's `meta` field, constructed by `definePlugin()`. The marketplace ([ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4)) extracts this metadata at publish time. See [ADR-007 Plugin identity lives in code via definePlugin()](/decisions/007-plugin-identity-in-code).
+
+
+## The AlumicPlugin Interface
+
+```typescript
+export interface AlumicPlugin {
+  /** Metadata identifying this plugin and its dependencies. */
+  readonly meta: PluginMeta;
+
+  /**
+   * Called once during App.boot() in dependency order.
+   * Register subsystems, subscribe to channels, schedule systems.
+   * Optionally return a Disposable for cleanup during shutdown.
+   */
+  build(ctx: AppContext): void | Disposable;
+}
+```
+
+### PluginMeta
+
+```typescript
+export interface PluginMeta {
+  /** Unique name for this plugin (conventionally the package name). */
+  readonly name: string;
+
+  /** Semver version string. */
+  readonly version?: string;
+
+  /**
+   * Names of plugins this plugin depends on.
+   * The kernel guarantees these plugins' build() methods have
+   * already been called before this plugin's build() runs.
+   */
+  readonly dependencies?: readonly string[];
+
+  /**
+   * If true, only one instance of this plugin can be registered.
+   * Attempting to register a second throws an error.
+   * Default: false.
+   */
+  readonly unique?: boolean;
+}
+```
+
+### The definePlugin Factory
+
+```typescript
+/**
+ * Define a plugin. This is a pass-through identity function that provides
+ * type inference and a consistent declaration pattern.
+ *
+ * @example
+ * export const combatPlugin = definePlugin({
+ *   meta: { name: 'Combat', version: '0.1.0', dependencies: ['Core'] },
+ *   build(ctx) {
+ *     ctx.subsystem(CombatSubsystem);
+ *     ctx.schedule(Phase.Update, combatTick, 'CombatTick');
+ *     DamageDealt.on((e) => ctx.get(HealthSubsystem).apply(e));
+ *   },
+ * });
+ */
+export function definePlugin(plugin: AlumicPlugin): AlumicPlugin;
+```
+
+### Plugin Factory Functions
+
+Most plugins are exposed as factory functions rather than raw `AlumicPlugin` objects. This allows configuration:
+
+```typescript
+// @alumic/render-three
+export function threeWebGL(config?: ThreeWebGLConfig): AlumicPlugin {
+  return definePlugin({
+    meta: { name: 'RenderThree', version: '0.1.0' },
+    build(ctx) {
+      // Use config to configure the Three.js renderer
+      const kernel = new ThreeRenderKernel(config);
+      ctx.subsystem(RenderSubsystem);
+      ctx.schedule(Phase.PreUpdate, (tick) => kernel.beginFrame(tick));
+      ctx.schedule(Phase.PostUpdate, (tick) => kernel.render(tick));
+    },
+  });
+}
+```
+
+The consumer writes:
+
+```typescript
+const app = new App({
+  plugins: [
+    threeWebGL({ antialias: true, shadowMap: true }),
+    input(),
+    combatPlugin,   // Can also pass a raw plugin object
+  ],
+});
+```
+
+
+## Plugin Registry
+
+The `PluginRegistry` is an internal kernel component that manages plugin installation and resolution.
+
+```typescript
+export interface PluginRegistry {
+  /** Add a plugin. Does not call build() yet. */
+  add(plugin: AlumicPlugin): void;
+
+  /** Check if a plugin is registered by name. */
+  has(name: string): boolean;
+
+  /** Get a plugin by name. */
+  get(name: string): AlumicPlugin | undefined;
+
+  /**
+   * Topologically sort plugins by dependencies,
+   * verify all dependencies are satisfied,
+   * then call build(ctx) on each in order.
+   * Returns the Disposables from build() calls.
+   */
+  buildAll(ctx: AppContext): Disposable[];
+
+  /** List all registered plugin names. */
+  names(): readonly string[];
+}
+```
+
+### Dependency Resolution
+
+During `buildAll()`, the registry:
+
+1. **Validates** — Checks that every declared dependency exists in the registry. Throws a descriptive error if any dependency is missing:
+   ```
+   PluginError: Plugin "Combat" depends on "Health", but "Health" is not registered.
+   Did you forget to add it to the App's plugins list?
+   ```
+
+2. **Sorts** — Performs a topological sort using Kahn's algorithm. Detects circular dependencies and throws:
+   ```
+   PluginError: Circular dependency detected: Combat → Health → Combat
+   ```
+
+3. **Builds** — Calls `build(ctx)` on each plugin in sorted order. If a plugin's `build()` throws, the error is caught and re-thrown with context:
+   ```
+   PluginError: Plugin "Combat" failed during build():
+   TypeError: Cannot read properties of undefined (reading 'healthMap')
+   ```
+
+### Uniqueness Enforcement
+
+Plugins with `meta.unique: true` can only be registered once. This is used for plugins that manage global resources (e.g., the render kernel — you can't have two renderers):
+
+```typescript
+export function threeWebGL(config?: ThreeWebGLConfig): AlumicPlugin {
+  return definePlugin({
+    meta: { name: 'RenderThree', unique: true },
+    build(ctx) { /* ... */ },
+  });
+}
+```
+
+Attempting to register two `unique` plugins with the same name throws:
+
+```
+PluginError: Plugin "RenderThree" is marked as unique but was registered twice.
+```
+
+
+## Plugin Lifecycle
+
+### Boot Phase
+
+```
+App.boot()
+  │
+  ├── 1. Collect all plugins from AppConfig.plugins
+  ├── 2. Add each to PluginRegistry
+  ├── 3. PluginRegistry.buildAll(ctx):
+  │       ├── Validate dependencies
+  │       ├── Topological sort
+  │       └── For each plugin (in order):
+  │           └── plugin.build(ctx)
+  │               ├── Register subsystems
+  │               ├── Subscribe to channels
+  │               ├── Schedule systems
+  │               └── Return Disposable (optional)
+  │
+  ├── 4. Initialize all App-scope subsystems
+  └── 5. Start tick loop
+```
+
+### Shutdown Phase
+
+```
+App.shutdown()
+  │
+  ├── 1. Stop tick loop
+  ├── 2. Deinit all active subsystems (Player → Scene → Session → App order)
+  └── 3. Call each plugin's Disposable in reverse build order
+```
+
+### What build() Should Do
+
+A plugin's `build(ctx)` is the single setup point. It should:
+
+- **Register subsystems** — `ctx.subsystem(MySubsystem)` declares that a subsystem should be initialized when its scope is entered
+- **Subscribe to channels** — `MyChannel.on(handler)` sets up event listeners
+- **Schedule systems** — `ctx.schedule(Phase.Update, mySystem, 'MySystem')` adds a per-frame function
+- **Provide services** — Store state in subsystems, not in module-level variables
+
+A plugin's `build()` should NOT:
+
+- Perform I/O (loading files, making network requests) — defer to subsystem `init()` which can be async
+- Access other plugins' subsystem state — the subsystem may not be initialized yet. Use `ctx.get()` only from within system functions or event handlers that run after boot
+- Modify global state — all state should flow through the kernel (subsystems, channels, scheduler)
+
+
+## First-Party vs. Third-Party Plugins
+
+Two execution models coexist once the marketplace lands (Phase 4, [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing)). The decision is **not** made by the plugin author; it's made at install time based on the bundle's signature.
+
+| | **First-party** (bundled with Alumic or signed by Alumic's root key) | **Third-party** (marketplace, signed by Alumic publish pipeline) |
+|---|---|---|
+| Realm | Main app realm | Web Worker sandbox |
+| `ctx` shape | `AppContext` (synchronous, full surface) | `AppContext` (RPC proxy — many methods become async) |
+| DOM access | Direct | None (editor surfaces render in a sandboxed `<iframe>` with a restricted `postMessage` bridge) |
+| Entity access | Any project in the open workspace | Only the current project; only entity types declared in `meta.permissions.entityTypes` |
+| Asset access | Direct | Host-brokered signed-URL requests ([ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage)) |
+| Outbound `fetch` | Unrestricted | Gated by `meta.permissions.networkAllowlist` |
+
+### Declared permissions (third-party)
+
+Third-party plugins add a `permissions` field to `meta`:
+
+```typescript
+export interface PluginMeta {
+  // ...existing fields...
+  readonly permissions?: {
+    entityTypes: string[];           // types the plugin may read/write
+    readBacklinks?: boolean;
+    networkAllowlist?: string[];     // outbound domain allowlist
+    assetUpload?: boolean;
+  };
+}
+```
+
+The install flow surfaces `permissions` to the user before install ([ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing)). Permission upgrades on update require re-consent.
+
+### Writing portable plugins
+
+Plugin authors do not choose the realm, but can write code that works in both:
+
+- Treat everything on `ctx` as potentially async (await even in synchronous-looking reads). The proxied surface wraps sync methods in promises when needed.
+- Avoid touching `document`, `window`, or any global. Editor surfaces must register via `ctx.editors.register()` ([Navigation and Shell](/reference/navigation-shell)), not by manipulating the DOM.
+- Use `ctx.assets.load(id)` — never construct asset URLs directly.
+- Declare every entity type you touch in `meta.permissions.entityTypes`.
+
+Plugins that can't honor these constraints run only as first-party — they are ineligible for marketplace publish.
+
+
+## Hot Module Replacement (Future — Phase 4)
+
+The plugin interface will support an optional `swap()` method for state-preserving replacement:
+
+```typescript
+export interface AlumicPlugin {
+  meta: PluginMeta;
+  build(ctx: AppContext): void | Disposable;
+
+  /**
+   * Called when this plugin is hot-replaced.
+   * Migrate state from the old instance to preserve continuity.
+   * Only called if both old and new plugins have the same meta.name.
+   */
+  swap?(ctx: AppContext, old: AlumicPlugin): void;
+}
+```
+
+Two triggers fire the swap lifecycle:
+
+1. **Local dev HMR** — Vite detects a TS source change and reloads the plugin module. Used by plugin authors iterating locally.
+2. **Marketplace version bump** — a plugin the user's workspace has installed releases a new version and the server pushes a `schema.changed` event over the sync stream ([ADR-027 Engine-plugin sync is snapshot + event-stream, server-authoritative](/decisions/027-engine-plugin-sync-protocol)). The editor loads the new bundle and runs the swap.
+
+The swap sequence is the same for both triggers:
+1. The new plugin module is loaded (from Vite's module cache or from the marketplace bundle URL).
+2. The old plugin's `Disposable` is called (cleanup).
+3. The new plugin's `build(ctx)` is called.
+4. The new plugin's `swap(ctx, old)` is called if present.
+
+This allows subsystem state to survive replacement — the physics world keeps its bodies, the dialogue runner keeps its current node.
+
+Third-party marketplace plugins run sandboxed ([ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing)); the swap sequence above happens in the Worker realm. First-party plugins swap in the main realm.
+
+
+## Error Handling
+
+### Missing Dependencies
+
+```typescript
+// This will throw during boot because 'Nonexistent' is not registered
+definePlugin({
+  meta: { name: 'Broken', dependencies: ['Nonexistent'] },
+  build(ctx) { /* ... */ },
+});
+```
+
+Error: `PluginError: Plugin "Broken" depends on "Nonexistent", but "Nonexistent" is not registered.`
+
+### Circular Dependencies
+
+```typescript
+const A = definePlugin({ meta: { name: 'A', dependencies: ['B'] }, build() {} });
+const B = definePlugin({ meta: { name: 'B', dependencies: ['A'] }, build() {} });
+```
+
+Error: `PluginError: Circular dependency detected: A → B → A`
+
+### Build Failures
+
+If `build()` throws, the error is wrapped with context and re-thrown. The app does not boot. In development, the SolidJS error overlay shows the full stack trace.
+
+### Runtime Errors in Systems
+
+If a scheduled system throws during `tick()`, the scheduler catches the error, logs it to the `Errors` channel, and continues with the next system. The failing system is not automatically removed — it will be called again next tick. Persistent errors are surfaced in the debug panel.

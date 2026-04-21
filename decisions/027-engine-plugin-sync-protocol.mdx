@@ -1,0 +1,42 @@
+---
+title: "ADR-027: Engine-plugin sync is snapshot + event-stream, server-authoritative"
+description: "The engine plugin pulls state from Alumic via two endpoints, both scoped to a `projectId`:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed) declares engine-portable schemas, and [Alumic](/) promises Unity/Unreal/Godot deployment. The audit surfaced that no mechanism exists for content to arrive in the engine plugin: no pull protocol, no incremental subscription, no drift story, no conflict shape.
+
+Two realistic shapes: (a) periodic full snapshot pulls — simple, wasteful, high-latency; (b) cold snapshot plus incremental event stream — the standard shape for remote-first clients (Git fetch-pack, Linear sync, Replicache).
+
+## Decision
+
+The engine plugin pulls state from Alumic via two endpoints, both scoped to a `projectId`:
+
+- **Cold snapshot:** `GET /api/projects/:id/snapshot` returns all entities + refs + an opaque `cursor`. Streamed as NDJSON so large projects pull incrementally without buffering.
+- **Incremental events:** `GET /api/projects/:id/events?since=<cursor>` returns `Entity.Created | Entity.Updated | Entity.Deleted` events ordered monotonically, terminated by a new `cursor`. Long-polling with a default 30s idle timeout; `?stream=sse` upgrades to Server-Sent Events for live push.
+
+The cursor is server-opaque (internally a monotonic LSN on the `entity_versions` table — [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)). Clients store it alongside their cache and resume from it on reconnect.
+
+The plugin's write path uses the same entity PATCH endpoints the browser uses, with the same `If-Match: <version>` optimistic-concurrency token ([ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)). **The server is always authoritative.** On conflict (server version > client's `If-Match`), the plugin surfaces a log line and re-pulls; there is no merge layer in the plugin.
+
+Assets transfer separately per [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage).
+
+The same endpoints power the browser editor's live-reload (replaces what an earlier sketch called "SSE push" as a separate subsystem — it is the same protocol, consumed differently).
+
+## Consequences
+
+**Enables:** An engine plugin that is a transparent read-through cache. Offline Unity sessions keep working against the cache and reconcile on reconnect via the cursor. Third parties can build new engine integrations against a single, documented protocol. The browser editor gets live reload for free.
+
+**Obligates:** The backend maintains a monotonic event log (`entity_versions`) with retention at least as long as any reasonable offline gap (default 30 days; beyond that the plugin falls back to a cold snapshot). Engine plugins cache entities content-addressable by `(id, version)`.
+
+**Forecloses:** A peer-to-peer engine-to-engine sync or a Git-shaped history model in Phase 1-4. Plugin writes cannot bypass the server.
+
+## Related
+
+- Specs: [Engine Plugin](/platform/engine-plugin), [Entity API](/reference/entity-api), [Sync Protocol](/reference/sync-protocol), [Deployment](/platform/deployment), [Authentication](/platform/authentication), [Database Schema](/platform/database-schema), [Middleware and Write Path](/platform/middleware), [Multiplayer](/platform/multiplayer), [Design Constraints](/platform/design-constraints), [Entity Graph](/reference/entity-graph), [Entity Types and Extractors](/reference/entity-types-and-extractors), [Entity Database](/reference/entity-database), [CLI](/guides/cli), [Validation](/guides/validation), [Testing](/guides/testing), [Debugging](/guides/debugging)
+- Depends on: [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab), [ADR-025 Project identity is a server-issued UUID](/decisions/025-project-identity-server-uuid), [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth).
+- Informs: [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape), [ADR-029 Binary assets are object-storage blobs with signed URLs](/decisions/029-assets-object-storage), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log), [ADR-033 Engine-portable transpile runs server-side on publish](/decisions/033-engine-transpile-server-side).

@@ -1,0 +1,63 @@
+---
+title: "Guides"
+description: "How-tos for template authors, plugin developers, and operators."
+icon: "map"
+---
+
+Task-oriented walkthroughs. If you're looking for the shape of an API, head to [Reference](/reference/architecture); if you need to understand why a decision was made, check [Decisions](/decisions). Otherwise start here.
+
+## Getting started
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/guides/quickstart">
+    Scaffold a project from a template and get the dev server running.
+  </Card>
+  <Card title="Project structure" icon="folder-tree" href="/guides/project-structure">
+    The Bun workspace layout: packages, templates, engines, tools.
+  </Card>
+</CardGroup>
+
+## Authoring content
+
+<CardGroup cols={2}>
+  <Card title="Authoring entities" icon="pen" href="/guides/authoring-entities">
+    The unit of authored content. Everything else is either an entity or references one.
+  </Card>
+  <Card title="Flow and state" icon="diagram-project" href="/guides/flow-and-state">
+    When to use `@alumic/state` (HSM) and when to use `@alumic/flow` (FlowGraph).
+  </Card>
+  <Card title="Dialogue" icon="comments" href="/guides/dialogue">
+    Authoring dialogue trees; line IDs and the localization pipeline.
+  </Card>
+  <Card title="Abilities" icon="bolt" href="/guides/abilities">
+    Attributes, effects, abilities; tag-gated activation.
+  </Card>
+  <Card title="UI design" icon="palette" href="/guides/ui-design">
+    Building HUD overlays and game UI with the Yoga-based designer.
+  </Card>
+</CardGroup>
+
+## Plugin development
+
+<CardGroup cols={2}>
+  <Card title="Writing a plugin" icon="plug" href="/guides/writing-a-plugin">
+    `definePlugin()`, subsystems, channels, lifecycle.
+  </Card>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Vitest patterns, plugin test harness, headless App fixtures.
+  </Card>
+</CardGroup>
+
+## Operations and DX
+
+<CardGroup cols={2}>
+  <Card title="CLI" icon="terminal" href="/guides/cli">
+    Every `alumic *` command — login, create, push, pull, publish.
+  </Card>
+  <Card title="Validation" icon="shield-check" href="/guides/validation">
+    Zod schemas and the server-side validation pipeline.
+  </Card>
+  <Card title="Debugging" icon="bug" href="/guides/debugging">
+    Debug panel, frame-budget counters, and performance monitoring.
+  </Card>
+</CardGroup>

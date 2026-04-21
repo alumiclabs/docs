@@ -1,0 +1,296 @@
+---
+title: "Save System"
+description: "SPUD-style chunked serialization with schema versioning."
+icon: "floppy-disk"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape), [ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log), [ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag)
+</Info>
+
+## Overview
+
+`@alumic/save` provides **SPUD-style chunked serialization** with schema versioning for *player game state* — current dialogue node, inventory contents, quest progress, variable values. It never serializes authored content (dialogue graphs, item definitions); those are reloaded from the entity database on session start.
+
+> **SaaS-first.** Save files are server-owned by default. The server backend (`/api/projects/:pid/saves`) is the authoritative store; local storage (IndexedDB / disk) is an offline mirror. Save slots are scoped to `(projectId, userId)` — a user's slots for Project A don't see Project B's. See [ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first), [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect).
+>
+> **Save state vs authoring state.** This chapter covers *player game state* only. Authored content (characters, dialogues, canvas boards) is the entity graph ([Entity Graph](/reference/entity-graph)). Save files never contain authored content — they contain references into it.
+
+## Design Principles
+
+1. **Explicit registration** — No reflection or automatic discovery. Every savable piece of state uses `defineSavable()` to declare what to save and how.
+2. **Schema versioning** — Each savable registers a version number. When loading a save from an older version, migration functions transform the data.
+3. **Chunked format** — The save file is a collection of named chunks, each from a different subsystem. Chunks can be added/removed independently.
+4. **Fast path / slow path** — If the in-memory schema version matches the saved schema version, data is restored directly (fast). If versions differ, the migration pipeline runs (slow but correct).
+
+## defineSavable
+
+```typescript
+export interface SavableConfig<T> {
+  /** Unique chunk ID. Conventionally the subsystem or plugin name. */
+  id: string;
+
+  /** Schema version. Increment when the save format changes. */
+  version: number;
+
+  /** Extract the serializable state from the live subsystem state. */
+  save(state: T): unknown;
+
+  /** Restore state from saved data. Called during session load. */
+  load(data: unknown, state: T): void;
+
+  /**
+   * Migrations from older versions to the current version.
+   * Key is the old version number; value transforms old data to new format.
+   */
+  migrations?: Record<number, (oldData: unknown) => unknown>;
+}
+
+export function defineSavable<T>(config: SavableConfig<T>): SavableHandle<T>;
+```
+
+Example:
+
+```typescript
+defineSavable<InventoryState>({
+  id: 'inventory',
+  version: 2,
+  save(state) {
+    return { slots: state.slots.map(s => ({ itemId: s.itemId, quantity: s.quantity })) };
+  },
+  load(data, state) {
+    const saved = data as { slots: Array<{ itemId: string; quantity: number }> };
+    state.slots = saved.slots.map(s => new InventorySlot(s.itemId, s.quantity));
+  },
+  migrations: {
+    1: (oldData) => {
+      const old = oldData as Record<string, number>;
+      return { slots: Object.entries(old).map(([itemId, quantity]) => ({ itemId, quantity })) };
+    },
+  },
+});
+```
+
+## Save File Format
+
+```json
+{
+  "$format": "alumic-save",
+  "$version": 1,
+  "metadata": {
+    "slotId": "slot-1",
+    "projectId": "0b7e5f1c-3e8a-4a3a-9a5e-1f9b7c4b8d21",
+    "userId": "01HR...",
+    "timestamp": "2026-04-20T15:30:00.000Z",
+    "templateName": "topdown-action",
+    "templateVersion": "0.1.0",
+    "playTime": 3600
+  },
+  "chunks": {
+    "inventory": {
+      "version": 2,
+      "data": { "slots": [ { "itemId": "sword-iron", "quantity": 1 } ] }
+    },
+    "quests": {
+      "version": 1,
+      "data": { "active": ["tutorial-quest"], "completed": [], "progress": { "tutorial-quest": { "currentStep": 2, "flags": {} } } }
+    },
+    "dialogue": {
+      "version": 1,
+      "data": { "globalVisits": { "intro-dialogue": 1 }, "variables": { "player.metShopkeeper": true } }
+    },
+    "player": {
+      "version": 1,
+      "data": {
+        "position": { "x": 10.5, "y": 0, "z": -3.2 },
+        "rotation": { "y": 1.57 },
+        "attributes": { "health": 85, "mana": 30 }
+      }
+    }
+  }
+}
+```
+
+## Save Manager
+
+```typescript
+export const SaveSubsystem = defineSubsystem<SaveManager>(
+  Scope.App,
+  (ctx) => ({
+    init() { return new SaveManager(ctx); },
+  }),
+);
+
+export class SaveManager {
+  register<T>(savable: SavableHandle<T>): void;
+
+  /** Serialize current state and persist via the configured backend. */
+  async save(slotId: string): Promise<void>;
+
+  /** Load a save slot and restore state. Runs migrations as needed. */
+  async load(slotId: string): Promise<void>;
+
+  async delete(slotId: string): Promise<void>;
+
+  async list(): Promise<SaveSlotInfo[]>;
+
+  async exists(slotId: string): Promise<boolean>;
+
+  /** Export a save as JSON (for sharing / backup). */
+  async export(slotId: string): Promise<string>;
+
+  /** Import a save from JSON. */
+  async import(slotId: string, json: string): Promise<void>;
+}
+
+export interface SaveSlotInfo {
+  slotId: string;
+  timestamp: string;
+  playTime: number;
+  templateName: string;
+}
+```
+
+## Storage Backends
+
+Save storage uses a pluggable backend selected by deployment mode:
+
+```typescript
+export interface SaveStorage {
+  read(key: string): Promise<string | null>;
+  write(key: string, value: string): Promise<void>;
+  delete(key: string): Promise<void>;
+  list(): Promise<string[]>;
+}
+```
+
+### Default: `serverBackend`
+
+Under SaaS (hosted, on-prem), saves flow through the entity API ([Entity API](/reference/entity-api)):
+
+- `POST /api/projects/:pid/saves` — create/update, body = save JSON, idempotent per `(userId, slotId)`.
+- `GET /api/projects/:pid/saves/:slotId` — read.
+- `GET /api/projects/:pid/saves` — list.
+- `DELETE /api/projects/:pid/saves/:slotId` — delete.
+
+```typescript
+export function serverBackend(projectId: string): SaveStorage;
+```
+
+#### Concurrency: last-write-wins per `(userId, slotId)`
+
+Save writes deliberately do **not** carry the `If-Match` optimistic-concurrency token used for entity writes ([ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape)). Saves are scoped to a single user's single slot in a single-player game (`Saves and Multiplayer` below); the supported concurrent-edit scenarios are:
+
+- **Same user, two devices** (browser tab on desktop + browser tab on phone) — last write wins. The user's most recent click is what they see when they reload either device.
+- **Same user, two tabs on the same device** — same semantics.
+
+Cross-user collisions are not possible (slots are user-scoped). Cross-device collisions on the same slot would surface as "I lost my last 5 minutes" — annoying but recoverable, since the previous slot version is preserved by the entity history mechanism ([ADR-032 Entities carry a version log; history is append-only](/decisions/032-entity-versions-event-log)) if the deployment retains save history.
+
+If a future template requires multi-device merging, it can layer `If-Match` on top via the `X-Alumic-Write-Id` idempotency header ([ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect)) and reject mismatched versions with the [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape) conflict shape — but the default save backend is intentionally last-write-wins to avoid forcing every game into conflict UI.
+
+### Offline mirror: `indexedDBBackend`
+
+When the server is unreachable ([ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect) offline mode), saves are queued to IndexedDB and replayed on reconnect. The mirror is a cache, not an alternate source of truth — on reconnect, the server's slot state wins and the mirror reconciles.
+
+```typescript
+export function indexedDBBackend(dbName?: string): SaveStorage;
+```
+
+### Test backend: `memoryBackend`
+
+In-memory-only storage for unit tests.
+
+```typescript
+export function memoryBackend(): SaveStorage;
+```
+
+Game code never names a backend — it uses whichever `SaveStorage` the App was configured with. Templates wire up backends in their `App` config based on runtime deployment mode. On-prem and single-user Electrobun installs use `serverBackend` pointed at the local backend URL ([ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect): "on-prem is not offline — it is a self-hosted SaaS"); there is no file-based deployment backend.
+
+### Save quotas
+
+Save writes count against the workspace's storage quota ([ADR-036 Every backend request carries a workspace tag for metering](/decisions/036-usage-metering-workspace-tag)). Per-tier caps are returned by `GET /api/workspaces/:id/plan`:
+
+- **Per-slot size cap.** Free tier: 256 KB. Paid tiers: 1 MB. Writes exceeding the cap return `413 Payload Too Large`.
+- **Per-project slot count cap.** Free tier: 5 slots (excluding `autosave`). Paid tiers: 50 slots.
+- **Autosave.** A single `autosave` slot is always allowed within the per-slot size cap, regardless of slot count.
+
+Templates should aim to keep save payloads small by serializing references into the entity graph (entity IDs) rather than copying entity content.
+
+## Schema Migration
+
+When loading a save with an older chunk version:
+
+```
+Save file:        chunks.inventory.version = 1
+Current savable:  inventory.version = 2
+
+1. Read saved data for 'inventory' chunk.
+2. Saved version (1) < current version (2).
+3. Run migration 1→2: migrations[1](oldData) → newData.
+4. Call load(newData, state) with the migrated data.
+```
+
+### Migration Chain
+
+Multiple versions chain:
+
+```
+Save version: 1, Current version: 4
+
+1→2: migrations[1](data)  → data2
+2→3: migrations[2](data2) → data3
+3→4: migrations[3](data3) → data4
+load(data4, state)
+```
+
+### Missing Chunks
+
+If a save file doesn't contain a chunk for a registered savable, the savable is skipped — the subsystem starts with its default state. Handles the case where a new plugin is added to a game that already has save files.
+
+### Extra Chunks
+
+If a save file contains a chunk that no savable is registered for, the chunk is silently ignored. Handles the case where a plugin is removed from a game.
+
+## Event Channels
+
+```typescript
+export const SaveStarted   = defineChannel<{ slotId: string }>('Save.Started');
+export const SaveCompleted = defineChannel<{ slotId: string; sizeBytes: number }>('Save.Completed');
+export const SaveError     = defineChannel<{ slotId: string; error: Error }>('Save.Error');
+export const LoadStarted   = defineChannel<{ slotId: string }>('Save.Load.Started');
+export const LoadCompleted = defineChannel<{ slotId: string; migrationsRun: number }>('Save.Load.Completed');
+export const LoadError     = defineChannel<{ slotId: string; error: Error }>('Save.Load.Error');
+```
+
+## What Gets Saved vs What Doesn't
+
+| Saved | Not Saved |
+|---|---|
+| Current dialogue node + variables | Dialogue graph definitions (reloaded from entity DB) |
+| Inventory contents | Item entity definitions (reloaded from entity DB) |
+| Quest progress | Quest entity structure (reloaded from entity DB) |
+| Player position, health, attributes | Attribute base definitions |
+| Active effects + timers | Effect definitions |
+| Game clock / play time | Engine settings |
+| Variable / flag state | UI state (window positions, etc.) |
+
+## Saves and Multiplayer
+
+**Save slots are single-player only.** Joining a Colyseus multiplayer room ([Entity API](/reference/entity-api)) disables saving — the `SaveManager` enters a disabled state while `MultiplayerManager.state === 'connected'` and emits `SaveError` with `reason: 'multiplayer-active'` if `save()` is called. Multiplayer rooms are ephemeral; room state is owned by the server and reconstructed on rejoin, not restored from a local save.
+
+Leaving the room returns the `SaveManager` to normal single-player operation.
+
+## Auto-Save
+
+The save manager supports periodic auto-save:
+
+```typescript
+ctx.schedule(Phase.PostUpdate, (tick) => {
+  const save = ctx.get(SaveSubsystem);
+  if (tick.elapsed % 300 < tick.dt) {  // every 5 minutes
+    save.save('autosave').catch(err => {
+      SaveError.emit({ slotId: 'autosave', error: err });
+    });
+  }
+}, 'AutoSave');
+```

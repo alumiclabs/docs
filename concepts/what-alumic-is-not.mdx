@@ -1,0 +1,13 @@
+---
+title: "What Alumic Is Not"
+description: "Anti-goals: not a general game engine, not a Figma clone, not a rendering framework, not a Unity clone."
+icon: "ban"
+---
+
+## What Alumic Is Not
+
+- **Not a general-purpose game engine.** Alumic does not ship a physics engine, animation system, or scene graph. It composes existing libraries (Three.js, Rapier, etc.) via plugins.
+- **Not a Figma clone.** The infinite canvas and vector editor are purpose-built for game development workflows — level planning, UI prototyping, icon management — not general-purpose design. They are powerful creative tools, but they serve the game development context.
+- **Not a rendering framework.** The render kernel is an abstraction boundary. Three.js is the initial substrate, but Alumic's value is in the systems above the renderer, not the renderer itself.
+- **Not an ECS framework.** ECS is available as optional plumbing (`@alumic/ecs`) for performance-sensitive entity management, but the core kernel and most game systems operate on plain typed objects.
+- **Not a Unity/Unreal clone.** Alumic deliberately avoids replicating heavyweight engine patterns (GameplayAbilitySystem, Subsystem hierarchies with 15 base classes). It takes *ideas* from those engines and distills them into ~300 lines of TypeScript kernel.

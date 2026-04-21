@@ -1,0 +1,17 @@
+---
+title: "Authentication"
+description: "Browser JWTs, engine-plugin PATs, workspace scoping."
+icon: "key"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing), [ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)
+</Info>
+
+## Authentication and Identity
+
+Browser sessions use email + password (bcrypt/argon2id) → JWT with a 15-minute access token + refresh token ([ADR-003 Authentication and identity phasing](/decisions/003-auth-phasing)). JWTs carry `{ userId, workspaceId, exp }`.
+
+Non-browser clients (engine plugin, CLI, CI) use **Personal Access Tokens** minted from account settings ([ADR-026 Engine-plugin authentication via workspace-scoped PATs](/decisions/026-engine-plugin-auth)). PATs are scoped to a workspace (optionally further to specific projects) with a scope set: `project:read`, `project:write`, `asset:read`. PATs never exceed the issuing user's current role.
+
+OAuth device flow for interactive plugin setup is deferred; when introduced, it mints a PAT-shaped token.
