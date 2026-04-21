@@ -1,0 +1,147 @@
+---
+title: "Component Patterns"
+description: "Inspector fields, entity cards, graph nodes, board cards, comments, review badges."
+icon: "grip"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals), [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model)
+</Info>
+
+Named patterns that recur across every mode. Each is a contract: if you build it, follow the anatomy below. Implementations are grounded in `@taleframe/ui` (Kobalte primitives) and `@taleframe/gantry` (blocks, charts, tables, resizable panels); parametric-mode patterns extend these from geonode-engine's DOM-based node/wire primitives.
+
+<Warning>
+This page names patterns. It does **not** document component APIs (props, events, a11y). Those belong in Reference once the shared component library stabilizes post-convergence. Today, implementations live in `@taleframe/ui`, `@taleframe/gantry`, and geonode-engine's editor package; consult source for current contract.
+</Warning>
+
+## Inspector field
+
+The schema-driven control used in every inspector, everywhere. A field renders one property from an entity's `data` or `editor_metadata`.
+
+**Anatomy.** Label (top) · control (right side) · optional description (below) · validation state (border + inline message) · optional override marker (a chip indicating "modified from default").
+
+**Control variants.** Text input, multi-line text, number, boolean switch, enum select, tag picker (with autocomplete against the Tag registry), entity-ref picker (autocomplete + jump-to), asset-ref picker (opens DAM), date, color, vector3.
+
+**Don'ts.** Don't invent a bespoke field type for your entity type — extend the schema and pick an existing control. Don't put mode-specific affordances in the field (the inspector is shell-wide; a Level-only chip doesn't belong on a field rendered in Narrative).
+
+## Entity card
+
+The ubiquitous summary tile. Used in canvas nodes, board cards, search results, asset pickers, entity-ref autocompletes, and anywhere else a user sees an entity without fully entering it.
+
+**Anatomy.** Type icon (left) · display name (top) · one-line summary or subtitle (below) · tags (right, overflow-truncated) · optional thumbnail (right, 40×40) · optional status chip (bottom right — "draft", "review pending", "shipped").
+
+**Variants by context.**
+- **Dense** (autocomplete, picker) — single line: icon · name · subtitle-or-path.
+- **Default** (search result, inspector reference) — two lines.
+- **Rich** (board card, canvas pin) — with thumbnail and tags.
+
+**Don'ts.** Don't show internal IDs in the default rendering; show names. Don't embed action buttons in the card; actions live in the containing context's menu.
+
+## Graph node
+
+The shape used by the narrative editor, the parametric editor, the quest / flow graph editors, and any plugin-contributed graph mode. One visual grammar for all of them.
+
+**Anatomy.** Header (type-colored bar with icon + node name) · body (ports left/right, data preview in middle) · footer (optional: condition, status, error chip).
+
+**Variants by LOD.**
+- **Overview (0.5× zoom or less)** — header color only; name truncated; ports as tick marks.
+- **Structure (0.5–1.0×)** — header + name + port labels; no body content.
+- **Detail (1.0–2.0×)** — full header + body with in-place editable primary fields.
+- **Edit (>2.0×)** — inspector-style field rendering inline; selection-to-edit.
+
+**Port conventions.** Input ports on the left; output ports on the right. Multi-connection inputs (geonode's `multi: true`) render with a differently-weighted tick.
+
+**Don'ts.** Don't invent a second graph visual grammar for your plugin. Extend the node-type registry ([ADR-018](/decisions/018-entity-registration-api)); don't fork the rendering.
+
+## Canvas node (creative canvas)
+
+A spatial pin on the Milanote-style canvas. Mostly a wrapped entity card, positioned freely.
+
+**Anatomy.** Draggable card body · connection anchors on each edge (for pulling a Connection to another pin) · selection outline · optional annotation marker (a small label pin offset from the card).
+
+**Types.** FreeformNote (no entity ref), EntityPin (wraps any entity card), AssetPin (media embed), Connection (edge, not a node — but authored here).
+
+## Level-editor shape
+
+A placeable prop, terrain, or reference image in the 3D level editor. Lives in the split-pane plan/scene view.
+
+**Anatomy.** 2D plan-view silhouette with dimension label · 3D scene-view mesh · selection outline · gizmo on selection (translate / rotate / scale) · label chip on hover.
+
+**Variants.** Box, plane, cylinder, terrain (paints via brush, height-mapped), reference-image (2D backdrop), custom (CSG result, parametric-backed).
+
+**Don'ts.** Don't render placeable character entities as plain shapes — render them as typed `CharacterPlacement` props with a distinct silhouette and the linked Character's preview.
+
+## Board card (PM)
+
+The kanban card used in PM boards, with entity-graph integration.
+
+**Anatomy.** Title (top) · assignee avatar (right) · linked-entity chips (below title) · labels (bottom left) · due date (bottom right) · open-review-request indicator (◇ diamond) if applicable.
+
+**States.** Draft (muted), open (default), in-review (diamond indicator), blocked (red edge), closed (strikethrough + collapsed).
+
+**Don'ts.** Don't invent board cards that can't be moved between columns (use a different list surface for non-sortable items). Don't embed the full issue content — that lives in the inspector.
+
+## Comment + mention
+
+Threaded discussion, used on any entity via the inspector's Comments section.
+
+**Anatomy.** Author avatar + name · timestamp · markdown body · thread replies indented · `@entity` mentions autocomplete from the entity graph, render as chips.
+
+**`@entity` chips.** The primary cross-domain discoverability inside prose. Clicking a chip jumps to the entity in its owning domain. Mentions are first-class refs — they appear in the target entity's "Used by" backlinks.
+
+**Don'ts.** Don't allow comments on non-entities (e.g., on individual lines of a dialogue). Comments attach to entities; sub-entity commentary is future work.
+
+## Review-request badge
+
+Shown on entities with an open proposal ([ADR-042](/decisions/042-proposed-writes-approvals)).
+
+**Anatomy.** Pinned banner above the inspector Properties section · state chip (open / approved / changes-requested / rejected / superseded) · proposer actor (with agent/user disambiguation per [ADR-041](/decisions/041-actor-model)) · inline approve / request-changes / reject controls if the viewer is a designated reviewer · diff toggle ("show proposed changes").
+
+**Don'ts.** Don't auto-apply approved proposals without the server-side acceptance step. Don't surface reviewer controls to non-reviewers — they see status only.
+
+## Presence avatar stack
+
+The "who else is here" indicator on every tab and in the inspector.
+
+**Anatomy.** Overlapping circular avatars (max 3 visible + overflow count) · per-avatar tooltip (name · "viewing" / "editing" · last-activity timestamp) · color border indicating role (owner / editor / viewer) or agent attribution.
+
+**Where it appears.** Active tab (who has this entity open), inspector (who's currently focused), board card (who's watching), scene thumbnail in Level mode's secondary panel.
+
+**Don'ts.** Don't animate the stack on every event — it's status, not activity. Flashing on a new viewer is noise.
+
+## Conflict modal
+
+import { ConflictModalTable } from '/snippets/conflict-modal-table.mdx';
+
+Surfaced when a write returns `409 Conflict` ([ADR-028](/decisions/028-conflict-error-shape)).
+
+<ConflictModalTable />
+
+**Anatomy.** Modal title naming the conflicting entity · summary of the fields that diverged · three action buttons (per the table) · link to the entity's History for deeper inspection.
+
+**Don'ts.** Don't auto-resolve silently. The conflict modal exists to keep the serialized-write model legible; silent resolution hides the collaboration signal.
+
+## Command palette result row
+
+The unit of `Cmd+K` — entity or action.
+
+**Anatomy.** Type icon · primary text (entity name or action name) · secondary text (type + path · "Open", "Jump to", "Run", etc.) · keyboard-hint on the right if applicable.
+
+**Ranking.** Recency (recently visited entities score higher) + textual fuzzy match + mode-affinity (in Narrative mode, narrative entities rank above level entities for ambiguous queries).
+
+## Phase-gated affordance
+
+Anything that isn't in the current Phase. Rendered so users know it's coming, not broken.
+
+**Anatomy.** Element displayed normally with a small lock icon in the corner · tooltip naming the phase and a short description · click opens a "this ships in Phase N" preview page rather than a dead surface.
+
+**Where it appears.** Siderail icons (Marketplace, PM until Phase 3), inspector sections (review-request controls pre-Phase-3), command palette actions, etc.
+
+## What's deliberately NOT in this list
+
+- **Mode toolbars.** Each mode owns its toolbar contents. No shared toolbar grammar across modes.
+- **Modals and dialogs.** Use Kobalte primitives; shape is context-specific.
+- **Notifications / toasts.** Standard Kobalte Toast; no Alumic-specific variant worth naming.
+- **Settings panels.** One per domain; no shared settings pattern beyond "Kobalte form fields."
+
+When a pattern ossifies enough to have a name and constraints, it earns a place on this page. Until then, just compose the primitives.

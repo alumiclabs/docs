@@ -1,0 +1,97 @@
+---
+title: "Tokens (appendix)"
+description: "Density, layout scale, semantic surfaces, motion primitives. No hex yet."
+icon: "ruler"
+---
+
+Minimum viable token appendix. No hex values, no typeface commitments — those wait for brand work. What's here is the structural vocabulary Alumic uses today, inherited from taleframe's Tailwind config and extended by design choices in this spec.
+
+## Density scale
+
+Three density modes, user-preference. Components are declared in `compact` units; the other two scale layout without changing the component.
+
+| Mode | Row height | Inspector field height | Button height | Use case |
+|---|---|---|---|---|
+| **compact** | 28px | 28px | 28px | Power users, dense data |
+| **comfortable** | 32px | 32px | 32px | Default |
+| **spacious** | 40px | 40px | 36px | Touch, accessibility |
+
+Density is a shell-wide preference, surfaced in Settings. Components read it via a Tailwind utility / CSS variable; don't hardcode per-component heights.
+
+## Layout scale
+
+Panel widths, gap sizes, inspector field sizing. Defer to Tailwind's spacing scale where possible (`gap-2`, `p-4`); explicit pixel values only for shell-chrome primitives.
+
+| Token | Value | Where |
+|---|---|---|
+| `shell.siderail.width` | 56px | Siderail column |
+| `shell.panel.default-width` | 220px | Secondary panel |
+| `shell.panel.min-width` | 160px | Secondary panel drag-resize floor |
+| `shell.inspector.default-width` | 300px | Inspector column |
+| `shell.inspector.min-width` | 240px | Inspector drag-resize floor |
+| `shell.tab.height` | 32px | Tab bar |
+| `shell.card.radius` | 8px | Entity card corner radius |
+| `shell.rhythm` | 8px | Base vertical rhythm (all multiples) |
+
+## Semantic surfaces
+
+Named slots, not hex values. Concrete colors resolve at theme-apply time. The names are contracts.
+
+| Surface | Used for |
+|---|---|
+| `surface-canvas` | Main viewport background (neutral, low-contrast) |
+| `surface-panel` | Secondary panel and inspector background (slightly elevated) |
+| `surface-siderail` | Siderail background (most elevated; darkest in dark mode) |
+| `surface-overlay` | Modals, popovers, dropdowns (floating, highest elevation) |
+| `surface-selected` | Selected items in lists, selected nodes in graphs |
+| `surface-hover` | Hover state on interactive rows |
+| `surface-critical` | Destructive actions (delete confirmations, conflict alerts) |
+| `surface-warning` | Review-pending, phase-gated content |
+| `surface-info` | Neutral informational callouts (`<Info>` in docs) |
+| `surface-success` | Approved proposals, completed issues |
+| `text-primary` | Default body copy |
+| `text-muted` | Subtitles, captions, timestamps |
+| `text-on-critical` | Readable text on `surface-critical` |
+| `border-subtle` | Default borders (inspector, panel) |
+| `border-focus` | Focus ring color |
+
+Themes (dark / light / high-contrast) bind concrete colors to each surface. A plugin or template **never** references a concrete color; it references a surface name.
+
+## Motion primitives
+
+Transitions are shell-wide, not per-page. Durations in milliseconds, easing curves named.
+
+| Token | Duration | Easing | Use case |
+|---|---|---|---|
+| `transition-instant` | 0ms | — | State-toggle with no animation (`Cmd+I` inspector collapse) |
+| `transition-fast` | 120ms | `ease-out` | Hover, button press, small panel reveals |
+| `transition-default` | 200ms | `ease-out` | Tab switch, inspector field validation, modal fade |
+| `transition-mode-swap` | 320ms | `ease-in-out` | Siderail domain change (viewport cross-fade + panel swap) |
+| `transition-long` | 480ms | `ease-in-out` | First-time onboarding cues, empty-state illustrations |
+
+Reduced motion respected: when `prefers-reduced-motion: reduce` is set, all durations collapse to `transition-instant` except `transition-mode-swap` (which collapses to `transition-fast`).
+
+## Typography
+
+**Deferred until brand work.** Taleframe currently inherits system-ui default. Alumic will ship a typeface choice once brand is set. Until then:
+
+- **Font family** — system-ui stack.
+- **Scale** — Tailwind's default (`text-xs` through `text-2xl`).
+- **Line height** — Tailwind `leading-normal` for body; `leading-snug` for UI labels.
+- **Code** — Tailwind `font-mono`.
+
+No custom scale, no brand typeface commitment yet. When brand lands, a follow-up page will document a type scale with semantic names (`text-display`, `text-body`, `text-label`, `text-code`).
+
+## Theme
+
+Inherits dark-mode-locked from taleframe today (see `apps/editor` app shell). A light-mode theme and a high-contrast theme are Phase-2+ work. Every semantic surface named above has a slot for each theme; theme-switch is a single token-bundle swap.
+
+## What's intentionally NOT in this page
+
+- **Hex values.** Defer to brand work.
+- **Typeface choices.** Defer to brand work.
+- **Iconography styles** (stroke weight, fill rules, corner radii). Currently inherited from lucide-solid via `@taleframe/icons`. Revisit when icon-set becomes a brand decision.
+- **Component API (props, events, a11y).** Not a token concern; lives in Reference once the shared component library stabilizes.
+- **Grid system.** Alumic does not have a product-wide grid. The shell is fixed-column; inside each mode's viewport, layout is mode-specific.
+
+When brand work happens, this page gets a follow-up document: a full token reference with concrete values, theme variants, and a brand-level typography scale. Until then, this minimum vocabulary is what design and engineering share.

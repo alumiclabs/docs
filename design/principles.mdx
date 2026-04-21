@@ -1,0 +1,66 @@
+---
+title: "Principles"
+description: "Seven load-bearing principles that keep Alumic coherent as it grows."
+icon: "lightbulb"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-054 Prototype convergence](/decisions/054-prototype-convergence), [ADR-055 Shell is four-column domain-first](/decisions/055-shell-domain-first), [ADR-004 No real-time collaboration in Phase 1-4](/decisions/004-no-realtime-collab), [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4)
+</Info>
+
+Seven principles. Each is rule-shaped — a constraint that can be applied to a specific UX decision and either pass or fail.
+
+## 1. Same playbook
+
+**One entity graph across all modes. One inspector schema. One navigation stack.** Every authored artifact — character, dialogue, scene, ability, issue, UI layout, vector asset, procedural graph — is an entity row with the same shape: `{ id, type, name, data, editor_metadata, tags, version }`. Every mode is a view over that one store.
+
+- **Applied:** The inspector rendered when focusing a Character is structurally identical whether you got there from the narrative editor, the level editor, or a PM board. Mode-specific chrome can extend it; it cannot replace it.
+- **Applied:** A backlink from a dialogue node to a character entity survives rename, mode switch, export, import. The link is by entity ID, not by path or name.
+
+## 2. Cross-mode coherence
+
+**Shell is identical across modes. Modes change what you see, never how you interact.** The siderail, secondary panel, viewport, and inspector columns are shell-level structures. A mode owns the *contents* of the viewport and the *contents* of the secondary panel — never the *shape* of the shell.
+
+- **Applied:** `Cmd+K`, breadcrumbs, tab management, selection-focus semantics, undo shortcuts, and presence indicators behave identically in Narrative, Level, PM, and every other mode.
+- **Applied:** When a new mode is added, it inherits the shell for free. Contributors don't design chrome; they design content.
+
+## 3. Entity-centric data, domain-centric nav
+
+**Entities are the unit of data; domains are the unit of navigation.** Per [ADR-055](/decisions/055-shell-domain-first), the shell's primary navigation axis is domain (narrative, level, canvas, vector, parametric, UI, PM, assets, marketplace). Entities are discoverable across domains via three layered affordances: `Cmd+K`, inspector backlinks, and an optional siderail Entity slot in Phase 3+.
+
+- **Applied:** A user navigates to "the hermit's intro dialogue" by going to **Narrative** and opening `intro.graph`. They don't start in a unified entity browser and pick an editor.
+- **Applied:** Once there, the inspector's "Used by" section tells them the same character is placed in `forest-clearing` (Level) and tracked by `hermit-quest-issue` (PM). One click to either.
+
+## 4. Author-once, reuse-everywhere
+
+**The same entity authored in one mode appears, unchanged, in every other mode it's relevant to.** The entity graph is the single source of truth; no mode gets to hold a private copy.
+
+- **Applied:** A Character entity authored in the narrative editor shows up in the level editor's entity picker under "Characters." Placing it in a scene creates a reference, not a copy.
+- **Applied:** Renaming the Character propagates. A dialogue that named the character by entity ID now reads correctly; a dialogue that named the character by string is a data-model bug caught at write-time.
+
+## 5. Marketplace over bespoke
+
+**Prefer template-modification workflows over from-scratch authoring.** For UI layouts, level blockouts, character bundles, vector assets, and genre presets: pick a template from the marketplace, modify it, ship it. From-scratch authoring is always possible but never the default.
+
+- **Applied:** The UI mode does not have a Figma-class WYSIWYG designer. It has a template picker with token-binding edits. A user modifies a chosen HUD template's health-bar color binding; they don't design a health bar from a blank canvas.
+- **Applied:** The level editor's blockout flow starts from a genre-preset scene (FPS-arena, RTS-skirmish, narrative-room) rather than an empty viewport.
+- **Rationale:** Generalist developers at small studios don't have the time budget to design UIs and levels from scratch. Curation plus modification is the only viable default.
+
+## 6. Presence before real-time
+
+**Show who's here, who's viewing, who last touched this entity — even when writes are serialized.** Per [ADR-004](/decisions/004-no-realtime-collab), real-time co-editing is a Phase 5+ concern. Presence chrome is day-one. The shell can feel collaborative long before the backend supports CRDT merging.
+
+- **Applied:** The active tab carries a small avatar stack showing who else has this entity open. The inspector names the last author. The board card shows who's assigned.
+- **Applied:** Conflict modals ship early ([ADR-028](/decisions/028-conflict-error-shape)) so the serialized-write model stays legible. Users see "your teammate updated this while you were editing" before they see "merge these two edits automatically."
+
+## 7. Generalist-first
+
+**Design for one person doing five things, not five specialists each doing one.** No deep specialist panels buried three menus down; no assumption that "the narrative designer" is a different user from "the level designer."
+
+- **Applied:** The onboarding flow (see [Onboarding](/design/onboarding)) is genre-driven, not role-driven. A user picks "FPS" or "RTS" — not "I am a writer" vs. "I am a combat designer."
+- **Applied:** The command palette (`Cmd+K`) is the fast path to any action in any mode. A generalist developer should never need to memorize mode-specific menus to do common things.
+- **Applied:** The PM mode ships as a first-class surface, not as a "for project managers" sub-app. A solo dev tracks their own sprint on the same board their one colleague uses.
+
+## How to use these principles
+
+Every design decision — a new panel, a new shortcut, a new setting — should pass against these seven as a checklist. If it fails one, either the design changes or a principle changes (and we write the ADR explaining why). The principles are not sacred; they are load-bearing. Breaking one requires a named reason.

@@ -1,0 +1,54 @@
+---
+title: "ADR-054: Alumic converges taleframe and geonode-engine as co-foundations"
+description: "Alumic is built by **converging taleframe and geonode-engine into a single pnpm monorepo**, with net-new packages added on top for the entity graph, dialogue runtime, team/workspace model, genre-prese"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+Alumic's earliest ADRs — notably [ADR-005 Bun workspaces as the monorepo tool](/decisions/005-bun-workspaces) (Bun workspaces), [ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed) (ECS FieldType exposed), [ADR-020 Render kernel is Three-native permanently](/decisions/020-three-native-boundary) (Three-native render boundary), [ADR-022 koota adoption deferred until 1.0](/decisions/022-koota-post-1-0) (koota deferred), [ADR-023 Phases 4 and 5 are conditional on adoption](/decisions/023-phase-4-5-conditional) (Phase 4/5 conditional) — were written before the prototype landscape was clear. They described a clean-room SaaS framework being built from scratch.
+
+Reality is different. Two working prototypes exist today and are the de-facto foundation:
+
+- **taleframe** (`C:\dev\taleframe`, pnpm monorepo, shipped internally as "Carta"). Mature 2D vector editor (`@taleframe/core`, Canvas2D + Rust/WASM geo, ~237 source files). Substantial 3D level editor (`@taleframe/level-editor`, split-pane plan view + scene view, CSG via `three-bvh-csg`, terrain painting, floor stacking, materials, reference images). Structural narrative graph editor (`@taleframe/narrative-editor`, story-arc / scene / dialogue / choice / symbol nodes with LOD zoom — read-only structurally). Local-first DAM (IDB / File System Access API). SolidJS + Kobalte + Tailwind shell with three-column layout, `SubsystemRegistry`, `CommandManager`.
+- **geonode-engine** (`C:\dev\geonode-engine`, npm workspaces, internally named "gantry" v0.1.0). Production-grade parametric node graph — 82 node definitions across 14 categories with Blender geometry-nodes parity (Distribute Points on Faces, Mesh Boolean, Extrude, Subdivide, Realize Instances, full curves system). Pull-based lazy evaluator with cycle detection and caching. DOM-based visual editor with SVG wires. Renderer-independent kernel (`@gantry/kernel` imports no Three.js; geometry flows through `GeneratedMesh` typed arrays, Three.js only at the rendering boundary via `@gantry/three`). IndexedDB auto-save. JSON-RPC control plane. 358 passing tests. Ten-of-ten roadmap phases complete.
+
+Both use SolidJS + Three.js v0.170, so the convergence is technically tractable. Neither has game-semantic abstractions (entities, materials-as-first-class, collision presets) or team/workspace machinery. Alumic is the layer that unifies them and adds what's missing.
+
+## Decision
+
+Alumic is built by **converging taleframe and geonode-engine into a single pnpm monorepo**, with net-new packages added on top for the entity graph, dialogue runtime, team/workspace model, genre-preset onboarding, marketplace, and PM mode.
+
+Shared stack floor:
+- **Package manager:** pnpm. (Taleframe is already pnpm; geonode-engine moves from npm workspaces.)
+- **Runtime:** SolidJS 1.9 + Kobalte + Tailwind for the shell and UI primitives; Three.js v0.170 at the rendering boundary; Canvas2D where taleframe's vector editor uses it; Rust/WASM (`@taleframe/geo-core`) for geometry-heavy paths.
+- **Persistence:** IndexedDB locally; Fastify + Postgres + MinIO server-side (per [[ADR-001 SaaS-first, on-prem second](/decisions/001-saas-first) SaaS-first, on-prem second](/decisions/001-saas-first)).
+- **Unit of authored content:** the **entity graph** that Alumic adds. Taleframe's `CartaNarrativeGraphData` and geonode's `SerializedGraph` become views over entity rows, not independent file formats.
+
+Both prototypes stay functionally intact during the merge. The glue layer — entity graph, dialogue runtime, team/workspace, genre onboarding, marketplace, PM — sits **above** them, wiring their outputs together. No prototype code is rewritten as a condition of convergence.
+
+## Consequences
+
+**Enables:**
+- The design spec describes real surfaces without speculation. Pages cite prototype file paths (`packages/core/src/subsystem_registry.ts`, `src/editor/types.ts`) where a pattern has an existing implementation.
+- Phase 2–3 scoping is accurate. Creative tooling ships because it already works; what ships is what's integrated.
+- The "Alumic converges" framing for public positioning becomes honest, not marketing gloss.
+
+**Obligates:**
+- **Reconciliation passes** on [[ADR-005 Bun workspaces as the monorepo tool](/decisions/005-bun-workspaces) Bun workspaces as the monorepo tool](/decisions/005-bun-workspaces) (pnpm wins; Bun can remain a target test runner but is not the workspace tool), [[ADR-019 ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed) ECS FieldType enum is exposed for engine-portable transpilation](/decisions/019-ecs-fieldtype-exposed) and [[ADR-022 koota adoption deferred until 1.0](/decisions/022-koota-post-1-0) koota adoption deferred until 1.0](/decisions/022-koota-post-1-0) (neither prototype ships an ECS today; `@alumic/ecs` stays a stub), [[ADR-020 Render kernel is Three-native permanently](/decisions/020-three-native-boundary) Render kernel is Three-native permanently](/decisions/020-three-native-boundary) (holds; applies to both prototypes), [[ADR-023 Phases 4 and 5 are conditional on adoption](/decisions/023-phase-4-5-conditional) Phases 4 and 5 are conditional on adoption](/decisions/023-phase-4-5-conditional) (creative tooling moves from conditional to committed; engine-plugin transpile and advanced multiplayer become the conditional bucket), and [ui-integration](/reference/ui-integration) (the Yoga WYSIWYG UI designer framing is superseded; Kobalte + Tailwind is the actual UI stack, and UI design is marketplace-template modification rather than from-scratch authoring).
+- A **translation layer** between geonode's `GeneratedMesh` and taleframe's `LevelShape`. Geonode outputs raw indexed triangle buffers with kernel-native CSG; level-editor consumes typed `LevelShape` primitives with CSG ops via `three-bvh-csg`. Bridging them — as a Phase-2 task — is named explicitly so it doesn't get hand-waved.
+- A decision on **graph-format convergence**. Taleframe serializes `CartaNarrativeGraphData`; geonode serializes `SerializedGraph`. Alumic's entity graph is the bridge: both become views over entity rows whose `data` field holds graph contents keyed by type. No duplicate formats.
+- A **repo merge plan** — actually moving geonode packages under the taleframe monorepo, reconciling TypeScript configs, resolving any dependency version drift. Tracked as a separate engineering task informed by this ADR.
+
+**Forecloses:**
+- The "Alumic is a clean-room SaaS framework built from scratch" narrative. The Vision page at `/design/vision` opens with the explicit convergence statement.
+- Shipping the two prototypes as separate products. Their identities dissolve into Alumic post-convergence; "Carta" and "gantry" branding are retired.
+
+## Related
+
+- Specs: [Alumic](/) (new Vision page), [Project Structure](/guides/project-structure) (monorepo layout; needs pnpm update), [Render Kernel](/reference/render-kernel) (Three.js boundary holds)
+- Supersedes: the Bun-everywhere assumption in [[ADR-005 Bun workspaces as the monorepo tool](/decisions/005-bun-workspaces) Bun workspaces as the monorepo tool](/decisions/005-bun-workspaces).
+- Narrows: [[ADR-023 Phases 4 and 5 are conditional on adoption](/decisions/023-phase-4-5-conditional) Phases 4 and 5 are conditional on adoption](/decisions/023-phase-4-5-conditional).
+- Informs: [[ADR-055 Shell is four-column domain-first](/decisions/055-shell-domain-first) Shell is four-column domain-first](/decisions/055-shell-domain-first) (the shell pattern assumes both prototypes are co-foundations), and every subsequent ADR that touches package management, ECS, UI stack, or phase sequencing.

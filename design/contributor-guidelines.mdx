@@ -1,0 +1,153 @@
+---
+title: "Contributor & Marketplace"
+description: "Conventions for plugin UI, marketplace templates, and parametric nodes."
+icon: "handshake"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-021 Templates and plugins distributed via Alumic marketplace (Phase 4)](/decisions/021-marketplace-phase-4), [ADR-034 Marketplace bundles are signed; third-party plugins execute in a worker sandbox](/decisions/034-marketplace-sandbox-signing), [ADR-037 Plugin-defined schemas, extractors, and migrations ship as publish artifacts](/decisions/037-plugin-schema-registration), [ADR-039 Templates ship seed content under data/entities/ + data/assets/](/decisions/039-template-seed-format), [ADR-046 Plugin networkAllowlist is enforced via CSP on a per-plugin subdomain](/decisions/046-plugin-sandbox-csp), [ADR-048 Template install seeds entities and rewrites refs server-side](/decisions/048-template-install-seed)
+</Info>
+
+Three kinds of contribution: **plugins** (in-app extensions), **marketplace templates** (UI layouts, level blockouts, genre bundles, character packs), and **parametric nodes** (extensions to the geonode-backed parametric mode). This page names conventions so contributed content feels native — no bespoke widgets, no hardcoded colors, no siloed navigation.
+
+## Plugin UI
+
+Plugins that register editor surfaces, inspector sections, or new domains must conform to the shell ([Shell & Interaction](/design/shell)).
+
+### Use primitives, not bespoke widgets
+
+- **Forms and controls** — Kobalte primitives (via `@taleframe/ui`). Don't hand-roll selects, comboboxes, modals, tooltips, or popovers. Kobalte covers a11y, keyboard, focus management.
+- **Tables, blocks, charts, resizable panels** — `@taleframe/gantry`. Re-use its shapes; don't fork for a slightly different visual.
+- **Icons** — `@taleframe/icons` (lucide-solid). The siderail icon set, inspector glyphs, and action buttons share this family.
+
+### Respect the shell contract
+
+Per [Shell & Interaction → What a mode cannot do](/design/shell#what-a-mode-cannot-do):
+
+- A plugin **cannot** move, resize, or hide the siderail, secondary panel, viewport, or inspector.
+- A plugin **cannot** replace the base inspector shape (Properties · References · Used by · Comments · Review request · History · Activity).
+- A plugin **cannot** repurpose tabs as cross-domain.
+- A plugin **cannot** steal `Cmd+K`, `Cmd+P`, `Ctrl+1–9`, or other shell-scope keys.
+
+A plugin **can** append inspector sections below the base seven, bind tool-specific keys while its domain is active, and own the contents of its secondary panel and viewport.
+
+### Sandbox awareness
+
+Third-party plugins run in a Web Worker sandbox with a per-plugin CSP ([ADR-034](/decisions/034-marketplace-sandbox-signing), [ADR-046](/decisions/046-plugin-sandbox-csp)). Plan for:
+
+- **No direct DOM access** — UI surfaces render in a sandboxed `<iframe>` with a `postMessage` bridge.
+- **Scope enforcement** — `ctx.entities` is proxied; you see only your declared entity types within the current project.
+- **Network allowlist** — declare outbound origins in `plugin.meta.permissions.networkAllowlist`; everything else is blocked by CSP.
+- **First-party vs. third-party** — first-party plugins run in the main realm; if you're contributing to the Alumic repo, that's you. Everyone else is sandboxed.
+
+## Marketplace template authoring
+
+Templates are the primary content type in the marketplace. Genre bundles, UI layouts, level blockouts, character packs, dialogue templates — they all follow the same shape.
+
+### Package layout
+
+Every template package uses the layout from [ADR-039](/decisions/039-template-seed-format):
+
+```text
+my-template/
+├── package.json              # @my-studio/template-foo
+├── meta.json                 # name, description, version, category, preview asset IDs
+├── data/
+│   ├── entities/
+│   │   ├── characters/*.entity.json
+│   │   ├── scenes/*.entity.json
+│   │   ├── dialogues/*.entity.json
+│   │   └── ... one folder per entity type
+│   └── assets/
+│       ├── manifest.json
+│       └── blobs/<first-2-of-sha>/<full-sha>
+└── README.md
+```
+
+Entity IDs inside the bundle are **bundle-local**. The install pipeline rewrites them to the target project's IDs per [ADR-048](/decisions/048-template-install-seed). Don't hardcode IDs across entities expecting global stability.
+
+### UI template expectations
+
+UI templates (HUDs, menus, inventory grids, dialogue boxes) are the primary UI authoring surface ([Principle 5 — Marketplace over bespoke](/design/principles#5-marketplace-over-bespoke)).
+
+- **Expose named binding slots.** Every data-driven property is a slot: `fillPercent`, `label`, `visible`, `color`. Slots are user-editable; the template structure is not.
+- **Token-only styling.** No hex, no fixed typeface, no absolute spacing. Use design-system tokens ([Tokens](/design/tokens)) so the template adapts to the target project's theme.
+- **Responsive previews.** Every UI template ships with preview metadata for at least three viewport sizes (phone, tablet, desktop).
+- **No side-channels.** The template cannot call `fetch()` to external services; binding slots resolve via the shared `VariableRegistry`.
+
+### Genre bundles
+
+Genre bundles (FPS, RTS, third-person, top-down, 2D platformer, narrative-only) are a composite template: multiple entity types + asset bundle + preset configuration.
+
+- **Starter protagonist** — at least one Character entity with default abilities.
+- **Starter scene** — at least one Scene entity with a controller configuration.
+- **Character controller configuration** — serialized as entity metadata; the level editor consumes it to wire up camera and inputs.
+- **Initial PM state** — a default Board with a "first playable" Milestone and at least one starter Issue.
+- **Onboarding prompts** — optional copy cues that surface as canvas prompts in the new project's first session.
+
+Genre bundles are authored like any other template package and submitted to the marketplace; first-party genre bundles ship with the product.
+
+## Parametric node authoring
+
+Parametric-mode contributions extend geonode-engine's node registry. Nodes must be portable, declarative, and graph-safe.
+
+### Conform to `NodeDef`
+
+Per geonode-engine's `src/editor/types.ts`:
+
+```typescript
+interface NodeDef {
+  category: string;          // appears in the node-picker menu
+  headerColor: string;       // category-consistent color
+  subtitle?: string;
+  ins: SocketDef[];          // typed input ports
+  outs: SocketDef[];         // typed output ports
+  blIdname?: string;         // Blender node type identifier (if applicable)
+  isReroute?: boolean;
+}
+```
+
+**Socket types are strict.** Use the existing set (`geometry | float | int | vector | boolean | string | material | color | rotation | skeleton | particles`). Don't introduce new socket types without extending the shared type system — doing so is an ADR-scale change.
+
+### Declarative, not imperative
+
+Compute functions register via `NodeRegistry[blIdname] = async (ctx) => {...}`. Stay inside the evaluation contract:
+
+- **Pure** — same inputs produce same outputs. No side effects on the graph, no external writes.
+- **Deterministic** — no wall-clock randomness unless the node declares it (via an explicit seed input).
+- **Async-safe** — you may `await` internal work, but don't mutate shared state.
+- **Respect caching** — the evaluator caches per-node; don't rely on seeing every invocation.
+
+### Graph-portable defaults
+
+Nodes should work in isolation (disconnected, with defaults wired into every input) so users can drag them in without immediate connection. Declare sensible default values for every input in `NodeDef.ins[n].default`.
+
+## The "feels native" checklist
+
+Before publishing any plugin or template, verify:
+
+<Steps>
+  <Step title="Shell compliance">
+    Does your surface respect the four-column shell? (No moved panels; no stolen shell keys; no custom chrome that competes with the siderail.)
+  </Step>
+  <Step title="Primitive compliance">
+    Are all form controls Kobalte-derived? All tables / blocks from `@taleframe/gantry`? All icons from `@taleframe/icons`?
+  </Step>
+  <Step title="Entity-graph compliance">
+    Do references between your entity types use entity IDs, not name strings? Does your extractor register via `ctx.entities.registerExtractor` ([ADR-018](/decisions/018-entity-registration-api)) so backlinks work across domains?
+  </Step>
+  <Step title="Variable-registry compliance">
+    If your plugin exposes runtime variables, do they register via `ctx.variables.register(provider)` ([ADR-017 Shared VariableRegistry](/decisions/017-shared-variable-registry)) so other plugins can bind to them?
+  </Step>
+  <Step title="Token compliance">
+    Any color, spacing, or typography in your UI — is it a token (no literal hex, no hardcoded pixels)? See [Tokens](/design/tokens).
+  </Step>
+  <Step title="Sandbox compliance">
+    Have you declared `networkAllowlist`, `entityTypes`, and other permissions in `plugin.meta.permissions` ([ADR-034](/decisions/034-marketplace-sandbox-signing))?
+  </Step>
+  <Step title="Phase-gate compliance">
+    Does your content declare the minimum Phase it requires? Features referencing Phase-4 surfaces (marketplace install, approvals) should not silently break in Phase-2 projects.
+  </Step>
+</Steps>
+
+Pass all seven → your contribution looks and behaves like first-party Alumic. Fail one → fix it before publishing. The marketplace moderation queue checks for the automated subset (extractor registration, variable-registry registration, permission declaration, no hardcoded hex).

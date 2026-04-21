@@ -1,0 +1,195 @@
+---
+title: "Shell & Interaction"
+description: "Four-column domain-first shell: siderail · panel · viewport · inspector."
+icon: "browser"
+---
+
+<Info>
+**Decisions shaping this page:** [ADR-055 Shell is four-column domain-first](/decisions/055-shell-domain-first), [ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api), [ADR-028 Optimistic-concurrency conflict shape](/decisions/028-conflict-error-shape), [ADR-031 Offline and reconnect semantics per client](/decisions/031-offline-and-reconnect), [ADR-042 Proposed writes and approval gates](/decisions/042-proposed-writes-approvals), [ADR-041 Actor model: users and agents as peers](/decisions/041-actor-model)
+</Info>
+
+import { ConflictModalTable } from '/snippets/conflict-modal-table.mdx';
+
+The Alumic shell is **four-column domain-first**. Left to right: a thin **siderail** for domain selection, a **secondary panel** scoped to the current domain, the **main viewport** for the focused entity, and a shell-wide **inspector** that follows selection. Tabs live above the viewport and are scoped to the current domain — switching siderail swaps the tab bar, not the other way around.
+
+```text
+┌──┬──────────────┬───────────────────────────────────┬──────────────┐
+│  │ Narratives   │ [intro.graph] [forest-arc]  +     │ Inspector    │
+│ 🏠│              │  ┌───────────────────────────┐    │ ─────────    │
+│ 📓│ ▾ Drafts     │  │                           │    │ Properties   │
+│ 🗺│   Intro      │  │     Main viewport         │    │  name        │
+│ 🧩│   Forest arc │  │  (mode-specific editor)   │    │  role        │
+│ 🛠│ ▾ Shipping   │  │                           │    │  bio         │
+│ 📋│   ...        │  │                           │    │              │
+│ 🛒│              │  └───────────────────────────┘    │ References   │
+│   │              │                                    │ Used by      │
+│   │              │                                    │ Comments     │
+└──┴──────────────┴───────────────────────────────────┴──────────────┘
+ siderail  panel              viewport + tabs             inspector
+  ~56      ~220                   flex                     ~300
+```
+
+## Why domain-first
+
+Spec-era design assumed an **entity-first** three-column shell (browser · viewport · inspector) where clicking an entity in the browser mounts the appropriate editor. That model works when every entity shares an interaction grammar — Notion's "everything is a document," Linear's "everything is an issue."
+
+Alumic is not that product. Its six modes have fundamentally different grammars:
+- 3D viewport with transform gizmos and terrain brushes.
+- Node-graph canvas with LOD zoom and port dragging.
+- Kanban boards with drag-between-columns and sprint ceremony.
+- Canvas2D surface with path tools and boolean ops.
+- DOM-based parametric node editor with pull-based evaluation.
+- Milanote-shaped creative canvas with mixed media.
+
+Forcing these under one browser strains the shell — each mode reinvents affordances. Domain-first respects grammar divergence: domains own their viewport; the shell stays identical. See [ADR-055](/decisions/055-shell-domain-first) for the full decision.
+
+## Siderail
+
+- **Width** — ~56px, icon-only. Tooltips on hover for label/keyboard hint.
+- **Icons (in order)** — Home · Narrative · Level · Canvas (creative) · Vector · Parametric · UI · PM · Assets · Marketplace · Settings.
+- **Selection** — persists per-project. A user who left Narrative last session opens Narrative on return.
+- **Keyboard** — `Ctrl+1` through `Ctrl+9` cycle to the first nine slots; `Ctrl+0` jumps Home. Beyond nine, the siderail gains a "more" overflow or secondary menu — revisit once slot count grows.
+- **Phase gating** — domains locked behind a Phase (e.g., Marketplace lands Phase 4) render their icon with a lock badge and a tooltip naming the phase. Clicking shows a "this ships in Phase N" preview page rather than navigating to a broken surface.
+
+## Secondary panel
+
+Each domain owns its panel shape — shape follows the natural browse unit:
+
+| Domain | Panel shape |
+|---|---|
+| Narrative | Tree of dialogue / quest / lore graphs grouped by folder. |
+| Level | Grid of scene thumbnails + floor-layer sidebar. |
+| Canvas (creative) | Tree of boards, each board a list of pinned entities. |
+| Vector | Folder tree of vector assets + a "recent" section. |
+| Parametric | Folder tree of saved node graphs + a "presets" section. |
+| UI | Grid of UI layouts (templates first; user-modified second). |
+| PM | Sidebar of boards + sprints + milestones. |
+| Assets | DAM browser — folders, tags, collection tree. |
+| Marketplace | Category tabs: Templates, Plugins, Asset Packs, Genre Bundles. |
+
+Collapsible (width: ~220px default, drag-resize). When collapsed the siderail is the only nav chrome; the viewport gains the width. Collapse state persists per-domain.
+
+## Main viewport
+
+The editor for the focused entity in the current domain. Shape varies per domain:
+
+- **Narrative** — node-graph canvas with LOD zoom, port-dragging, conditional-edge UI.
+- **Level** — split-pane (2D plan · 3D scene) with transform gizmos, terrain brush, material palette, CSG shape palette.
+- **Canvas (creative)** — infinite spatial workspace with pan/zoom, mixed-media pins.
+- **Vector** — Canvas2D editing surface with path tools, typography inspector, boolean ops.
+- **Parametric** — DOM-based node editor with SVG wires and pull-based evaluation preview.
+- **UI** — template picker on one side, live preview on the other, binding inspector in the middle.
+- **PM** — kanban board, sprint view, or milestone timeline depending on the active tab.
+
+**Tabs** sit above the viewport:
+- Domain-scoped. Switching siderail swaps the tab set.
+- Maximum ~8 non-pinned tabs; oldest auto-closes beyond that.
+- **Peek vs. persist** — opening an entity via inspector backlink creates a "preview" tab (italic title). Clicking another reference within ~3 seconds replaces the preview; editing or staying promotes it to persistent.
+- **Split** — one level of left/right split per [ADR-055](/decisions/055-shell-domain-first); scoped to the current domain.
+
+## Inspector
+
+Shell-wide. Follows selection across mode switches. Sections appear in a consistent order:
+
+1. **Properties** — schema-driven form for the focused entity's `data` field.
+2. **References** (outbound) — entities the focused entity points to. Clickable; jumps to the target in its owning domain.
+3. **Used by** (backlinks) — entities that reference the focused entity, grouped by source domain. **Primary cross-domain navigation mechanism.**
+4. **Comments** — threaded discussion on this entity, with `@entity` mention autocomplete.
+5. **Review request** — badge + inline approve/request-changes controls if a proposal targets this entity.
+6. **History** — last N versions with diff toggles.
+7. **Activity** — who touched this, when.
+
+Width ~300px, collapsible via `Cmd+I`. A power user can spend most of their time with the inspector open.
+
+## Entity-graph discoverability
+
+Three layered affordances, in priority order:
+
+<Steps>
+  <Step title="Cmd+K command palette (Phase 2, committed)">
+    Primary cross-domain entity finder. Type any character / dialogue / scene / issue name; hit Enter; jump to the right domain with that entity focused. Also runs action commands ("new character", "open settings").
+  </Step>
+  <Step title="Inspector backlinks (Phase 2, committed)">
+    Every focused entity's inspector shows "Used by" with one-click jumps to other domains. Falls out of the entity graph data model at near-zero marginal cost.
+  </Step>
+  <Step title="Siderail Entity-browser slot (Phase 3+, deferred)">
+    An optional siderail icon that opens a cross-domain unified entity browser — the entity-first view as a power-user fallback. Revisit once demand is proven; siderail real estate is finite.
+  </Step>
+</Steps>
+
+Without the first two, domain-first nav becomes a silo problem and the "same playbook" promise breaks. Both are structural, not nice-to-haves.
+
+## Selection and focus
+
+- **Selection** is viewport-local. Selecting a node in the narrative graph doesn't affect selection in the level viewport on an adjacent tab.
+- **Focus** is shell-wide. The entity whose inspector is showing. Focus survives domain switches; jumping from a Dialogue's inspector backlink to a Level in the Level domain preserves the Dialogue as "recently focused" in the inspector's history stack.
+- **Breadcrumbs** appear above the viewport in-domain: `Narratives › Intro › node-003`. Breadcrumbs do not cross domains; for that, use `Cmd+K` or inspector backlinks.
+
+## Keyboard shortcuts
+
+Canonical base set at shell scope. Domains extend with tool-specific keys that only bind while the domain is active.
+
+| Shortcut | Action |
+|---|---|
+| `Cmd+K` | Command palette |
+| `Cmd+P` | Quick open entity by name |
+| `Ctrl+1`–`9` | Siderail domain cycle |
+| `Ctrl+0` | Home |
+| `Cmd+B` | Toggle secondary panel |
+| `Cmd+I` | Toggle inspector |
+| `Cmd+W` | Close current tab |
+| `Cmd+Shift+T` | Reopen last closed tab |
+| `Cmd+Tab` / `Cmd+Shift+Tab` | Cycle tabs in current domain |
+| `Cmd+\` | Toggle left/right split |
+| `Cmd+N` | New entity (in current domain) |
+| `Cmd+S` | Save / flush pending write |
+| `Cmd+Z` / `Cmd+Shift+Z` | Undo / Redo (client-local) |
+| `Alt+Left` / `Alt+Right` | Back / Forward in focus stack |
+
+Domains may bind additional keys while active (e.g., Level binds `G/R/S` for transform gizmos). Bound keys are surfaced in the command palette so users can discover them.
+
+## Presence and collaboration chrome
+
+Even while writes are serialized ([ADR-004](/decisions/004-no-realtime-collab)), the shell feels collaborative via named surfaces:
+
+- **Active-tab avatar stack** — small avatars on the current tab showing who else has this entity open in another session.
+- **Inspector "Viewing now"** — names of users currently focused on this entity.
+- **Inspector "Last touched by"** — name + timestamp of the most recent edit author.
+- **Review-request badge** — when a proposal ([ADR-042](/decisions/042-proposed-writes-approvals)) targets this entity, the inspector surfaces approve / request-changes / reject controls.
+- **Agent attribution** — when an Actor is an Agent rather than a User ([ADR-041](/decisions/041-actor-model)), the attribution UI disambiguates clearly (icon + "on behalf of" user).
+
+## Conflict, review, and offline
+
+**Conflict modal** — when a write fails with `409 Conflict` ([ADR-028](/decisions/028-conflict-error-shape)):
+
+<ConflictModalTable />
+
+**Review request** — when an entity has an open proposal ([ADR-042](/decisions/042-proposed-writes-approvals)), the inspector shows a pinned banner: "Proposal pending review by {reviewers}." Designated reviewers see inline approve / request-changes / reject. Non-reviewers see status only.
+
+**Offline banner + outbox** ([ADR-031](/decisions/031-offline-and-reconnect)) — when the client loses the server:
+
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│ ⚠  Offline — 3 changes pending · Last synced 2 min ago · [Retry] │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Writes queue to IndexedDB with their `If-Match` version and a client-generated `writeId`. On reconnect, the outbox replays in order. Conflicts are surfaced per-entry via the conflict modal.
+
+## What a mode cannot do
+
+The shell is load-bearing; modes customize content, not chrome:
+
+- A mode **cannot** move, resize, or hide the siderail.
+- A mode **cannot** replace the inspector shape.
+- A mode **cannot** repurpose the tab bar as cross-domain.
+- A mode **cannot** steal `Cmd+K`, `Cmd+P`, or the base keyboard set.
+
+What a mode **can** do:
+- Own the contents of its secondary panel.
+- Own the contents of its main viewport.
+- Extend the inspector with additional sections (appended after the base seven).
+- Bind tool-specific keys that only fire when it's active.
+- Add buttons and menus to its own toolbar.
+
+This invariance is how cross-mode coherence gets enforced in practice — see [Principles → Cross-mode coherence](/design/principles#2-cross-mode-coherence).

@@ -1,0 +1,50 @@
+---
+title: "Design"
+description: "The product, its mechanisms, and the catalog that ties them together."
+icon: "compass"
+---
+
+Alumic's design spec is layered by audience: vision and principles for anyone orienting to the product; shell, modes, and onboarding for engineers building the surfaces; components, contributor guidelines, and tokens for plugin authors and template creators.
+
+## The product
+
+<CardGroup cols={2}>
+  <Card title="Vision" icon="eye" href="/design/vision">
+    What Alumic converges, who it's for, how it competes, and what success looks like.
+  </Card>
+  <Card title="Principles" icon="lightbulb" href="/design/principles">
+    Seven load-bearing principles that keep Alumic coherent as it grows.
+  </Card>
+</CardGroup>
+
+## The mechanisms
+
+<CardGroup cols={3}>
+  <Card title="Shell & interaction" icon="browser" href="/design/shell">
+    Four-column domain-first shell: siderail · panel · viewport · inspector.
+  </Card>
+  <Card title="Modes & workflows" icon="grid-2" href="/design/modes">
+    Six mode surfaces pivoting around one shared entity graph.
+  </Card>
+  <Card title="Onboarding" icon="door-open" href="/design/onboarding">
+    Genre pick → creative canvas → characters → level editor with preset modality.
+  </Card>
+</CardGroup>
+
+## The catalog
+
+<CardGroup cols={3}>
+  <Card title="Component patterns" icon="grip" href="/design/components">
+    Inspector fields, entity cards, graph nodes, board cards, comments, review badges.
+  </Card>
+  <Card title="Contributor & marketplace" icon="handshake" href="/design/contributor-guidelines">
+    Conventions for plugin UI, marketplace templates, and parametric nodes.
+  </Card>
+  <Card title="Tokens" icon="ruler" href="/design/tokens">
+    Density, layout scale, semantic surfaces, motion primitives. No hex yet.
+  </Card>
+</CardGroup>
+
+## Provenance
+
+Alumic is not a clean-room project. The design spec is grounded in two working prototypes that converge into the product ([ADR-054 Prototype convergence](/decisions/054-prototype-convergence)): **taleframe** (mature vector editor, substantial level editor, structural narrative graph editor, local DAM — SolidJS + Kobalte + Tailwind + Canvas2D + Three.js + Rust/WASM) and **geonode-engine** (82-node parametric graph with Blender-geometry-nodes parity, renderer-independent kernel, 358 passing tests). The spec describes the unified product; the Vision page names the prototypes explicitly so readers know which surfaces already ship versus which are net-new glue.

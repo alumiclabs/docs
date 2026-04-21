@@ -1,0 +1,66 @@
+---
+title: "ADR-055: Shell is four-column domain-first"
+description: "The Alumic shell is **four-column domain-first**:"
+---
+
+<Info>
+**Status:** Accepted · **Date:** 2026-04-20
+</Info>
+## Context
+
+[navigation-shell](/reference/navigation-shell) described an **entity-first three-column shell** — browser (left) · main viewport (center) · inspector (right) — where clicking an entity in the browser mounts the appropriate editor in the viewport. This model fits products where every entity shares an interaction grammar: Notion's "everything is a document," Linear's "everything is an issue," Obsidian's "everything is a note."
+
+Alumic is not that product. Its six modes have fundamentally different interaction grammars:
+- **Narrative graph editor** — node-graph canvas with LOD zoom, port dragging, conditional edges.
+- **3D level editor** — Three.js viewport with transform gizmos, terrain brushes, CSG shape palette.
+- **Creative canvas** — Milanote-shaped spatial workspace with mixed media, pin-and-connect.
+- **Vector editor** — Canvas2D surface with path tools, boolean ops, typography panels.
+- **Parametric node graph** — DOM-based node editor with SVG wires and pull-based evaluation.
+- **PM mode** — kanban boards, sprint ceremonies, issue flow.
+
+Forcing these under one entity-first browser strains the shell. Each mode re-invents affordances to accommodate its UX and drift between modes accumulates.
+
+Taleframe's current app shell is already domain-first, via a top-bar mode switcher + breadcrumb (`Projects → Pages → Levels/Narratives`). It works today because the surface is small. As Alumic's surface grows — marketplace, PM, assets, parametric — ten-plus domains without a persistent left nav becomes structural drift.
+
+Competitive references all use some form of domain-first left nav: VS Code's activity bar, Slack's server/channel rail, Linear's view rail, Discord's server rail, Obsidian's sidebar tabs. The pattern scales where a unified entity browser does not.
+
+## Decision
+
+The Alumic shell is **four-column domain-first**:
+
+1. **Siderail** (~56px wide, icon-only) — primary navigation axis. Icons for Home, Narrative, Level, Canvas (creative), Vector, Parametric, UI, PM, Assets, Marketplace, Settings. Selection persists per-project. Keyboard cycle: `Ctrl+1..9` for the first nine slots.
+2. **Secondary panel** (~220px, collapsible) — domain-scoped browser. Each domain owns its panel shape: narratives list, levels list, boards + sprints, asset folders, etc. Panel shape varies per domain (tree vs. grid vs. kanban-summary) because the domain determines the natural browse unit.
+3. **Main viewport** (flex) — the editor for the focused entity within the current domain. Shape varies per domain (Three.js scene, node graph canvas, kanban, vector surface). Mode-specific toolbars, gizmos, and canvas chrome live here. Tabs above the viewport are **scoped to the current domain** — switching the siderail swaps the tab bar, not the other way around.
+4. **Inspector** (~300px, collapsible) — shell-wide. Follows selection. Sections: Properties · References (outbound) · Used by (backlinks) · Comments · Review request (if any).
+
+**Entity-graph discoverability** is layered across three affordances:
+
+1. **`Cmd+K` command palette** — Phase 2, committed. Unified entity search + action search + cross-domain navigation. Primary entity finder for power users.
+2. **Inspector backlinks** — Phase 2, committed. Every inspector shows "Used by" with cross-domain links; one click jumps to the domain that owns the source entity with its tab focused. Falls out of the entity graph data model at near-zero marginal cost.
+3. **Siderail Entity-browser slot** — Phase 3+, deferred. An optional siderail icon that opens a cross-domain unified entity browser (the entity-first view as a power-user fallback). Revisit once demand is proven; siderail real estate is finite and shouldn't be spent on speculation.
+
+Selection is **viewport-local** (lives in the currently focused mode's viewport). Focus — the entity whose details the inspector shows — is **shell-wide** and survives domain switches, so jumping from a Dialogue's inspector backlink to a Level in the Level-editor domain preserves the original Dialogue as "recently focused" in the inspector's history stack.
+
+## Consequences
+
+**Enables:**
+- Each domain owns its interaction grammar without contorting to a shared browser pattern. Scales with the number of modes; ten siderail icons remains tractable while ten editor surfaces under one entity browser does not.
+- Consistent shell behavior. The layout never changes, only the contents. Users learn the shell once; modes change what they see, never how they interact.
+- Taleframe's current mode-first shell migrates incrementally — top-bar mode switcher becomes the left siderail; breadcrumb behavior moves into the tab bar; secondary panel formalizes what was already ad-hoc per mode.
+
+**Obligates:**
+- Three cross-domain discoverability affordances in priority order — `Cmd+K` and inspector backlinks in Phase 2; siderail Entity slot deferred. Without the first two, domain-first navigation becomes a silo problem and the "same playbook" promise breaks.
+- [navigation-shell](/reference/navigation-shell) to be revised to match (three-column → four-column; entity-first → domain-first with layered entity discoverability). Spec-24 revision follows this ADR.
+- Tabs must be redefined as domain-local, not shell-global. Previous designs that treated tabs as a cross-domain focus history need updating — focus history is inspector-level; tabs are per-domain.
+- The siderail must work for keyboard-first users. Number-key cycling covers the first nine slots; the tenth+ needs either a secondary menu or a "more" overflow.
+
+**Forecloses:**
+- Entity-first as the primary navigation grammar. Power users still reach any entity in one `Cmd+K` stroke; incidental navigation happens via inspector backlinks. But the shell does not pretend entity-first is the top-level pattern.
+- Shell designs that use the left column as a unified project-wide tree (the Notion / Obsidian model). The project-wide tree exists — it's the Cmd+K index and the optional Entity siderail slot — but it is not the primary left column.
+
+## Related
+
+- Specs: [navigation-shell](/reference/navigation-shell) (requires revision to match)
+- Depends on: [[ADR-018 Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api) Entity-type and extractor registration via ctx.entities](/decisions/018-entity-registration-api) (each domain still registers its main viewport component through the existing `ctx.editors.register()` surface; the shell only changes how domains are laid out, not how they are registered).
+- Depends on: [[ADR-054 Alumic converges taleframe and geonode-engine as co-foundations](/decisions/054-prototype-convergence) Alumic converges taleframe and geonode-engine as co-foundations](/decisions/054-prototype-convergence) (the shell pattern assumes both prototypes merge into one monorepo sharing one shell).
+- Informs: every subsequent UI-affecting spec and ADR.
